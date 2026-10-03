@@ -1,0 +1,479 @@
+#!/usr/bin/env python3
+"""Omarchy plugins for OmniSystem Center's Plugins tab.
+
+    omnisystem-center-plugins local                what is installed, with manifests and git state
+    omnisystem-center-plugins catalog [--refresh]  the marketplace feed, reduced and cached
+    omnisystem-center-plugins thumbs ID ...        cache preview thumbnails, print id -> file
+    omnisystem-center-plugins preview ID           cache the full-size preview, print its file
+    omnisystem-center-plugins updates [--refresh]  which git-installed plugins have a newer commit
+    omnisystem-center-plugins stats [--refresh]    hearts, views and installs per plugin (cached 5 min)
+    omnisystem-center-plugins changes ID           the commits and files an update would bring (GitHub)
+    omnisystem-center-plugins job ACTION ID [REPO [COMMIT]]
+                                                   install | remove | update | enable | disable;
+                                                   install with COMMIT pins the reviewed commit
+
+Every change goes through Omarchy's own `omarchy plugin` command; nothing
+here edits shell.json or a plugin folder itself.
+
+`omarchy plugin` ends every change by rescanning the shell's plugins, which
+tears down every open panel, this one included. So `job` is started
+detached: it records its progress in $XDG_RUNTIME_DIR/omnisystem-center/job.json
+(written in place, so the panel's file watch keeps working), and once the
+change is done it opens the Plugins tab again.
+
+The catalog comes from https://plugins.omarchy.org/catalog.json with a
+conditional request, so asking again within its cache time costs a 304.
+Thumbnails come only from that host over HTTPS, under a size cap, and the
+panel shows only the local copy. `updates` asks each plugin's own git remote
+which commit it points at (`git ls-remote`), downloading nothing.
+"""
+import concurrent.futures
+import glob
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+HOST = "https://plugins.omarchy.org"
+# Hearts, views and installs live in the marketplace's engagement API, not
+# in the catalog. Decoration only: when it is down everything else works.
+STATS_URL = "https://api.omarchyplugins.com/v1/stats"
+STATS_MAX = 8 * 1024 * 1024
+STATS_TTL = 300
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "omnisystem-center", "plugins")
+RUNTIME = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or CACHE, "omnisystem-center")
+JOB = os.path.join(RUNTIME, "job.json")
+CONFIG = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+USER_DIR = os.path.join(CONFIG, "omarchy", "plugins")
+SYSTEM_DIRS = [os.path.join(os.environ.get("OMARCHY_PATH", "/usr/share/omarchy"), "shell", "plugins"),
+               os.path.expanduser("~/.local/share/omarchy/shell/plugins")]
+SELF = "omnisystem-center"
+CATALOG_MAX = 64 * 1024 * 1024
+THUMB_MAX = 2 * 1024 * 1024
+PREVIEW_MAX = 8 * 1024 * 1024
+CACHE_FORMAT = 2
+UPDATE_TTL = 15 * 60
+KEEP = ("id", "name", "description", "author", "version", "category", "tags", "kind", "status", "repo",
+        "sourceType", "verificationStatus", "installAvailable", "installNote", "license", "stars",
+        "repositoryUpdatedAt", "addedAt", "previewThumbnail", "previewImage", "listingValidatedCommit",
+        "upstreamValidatedCommit", "upstreamObservedCommit")
+
+
+def run(argv, timeout=10, cwd=None):
+    try:
+        out = subprocess.run(argv, capture_output=True, timeout=timeout, check=False, cwd=cwd)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.decode("utf-8", "replace") if out.returncode == 0 else None
+
+
+def read_json(path, default=None):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return default
+
+
+def write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(data, handle)
+    os.replace(tmp, path)
+
+
+# ------------------------------------------------------------------ local
+
+def manifests():
+    """id -> (folder, manifest) for every plugin folder Omarchy scans."""
+    out = {}
+    for base in [USER_DIR] + SYSTEM_DIRS:
+        for manifest in glob.glob(os.path.join(base, "*", "manifest.json")) + glob.glob(os.path.join(base, "*", "*", "manifest.json")):
+            folder = os.path.dirname(manifest)
+            if os.path.basename(folder).startswith("."):
+                continue
+            data = read_json(manifest, {})
+            pid = data.get("id") if isinstance(data, dict) else None
+            if pid and pid not in out:
+                out[pid] = (folder, data)
+    return out
+
+
+def git_state(folder):
+    if not os.path.isdir(os.path.join(folder, ".git")):
+        return None
+    remote = (run(["git", "-C", folder, "config", "--get", "remote.origin.url"], 3) or "").strip()
+    head = (run(["git", "-C", folder, "rev-parse", "HEAD"], 3) or "").strip()
+    branch = (run(["git", "-C", folder, "rev-parse", "--abbrev-ref", "HEAD"], 3) or "").strip()
+    dirty = run(["git", "-C", folder, "status", "--porcelain", "--untracked-files=no"], 5)
+    return {"remote": remote, "head": head, "branch": branch, "dirty": bool(dirty and dirty.strip())}
+
+
+def bar_entries():
+    """id -> (section, index, the entry's own settings) from shell.json's bar."""
+    data = read_json(os.path.join(CONFIG, "omarchy", "shell.json"), {}) or {}
+    layout = ((data.get("bar") or {}).get("layout") or {}) if isinstance(data, dict) else {}
+    out = {}
+    for section in ("left", "center", "right"):
+        for index, entry in enumerate(layout.get(section) or []):
+            if isinstance(entry, dict) and entry.get("id"):
+                out.setdefault(entry["id"], (section, index, {k: v for k, v in entry.items() if k != "id"}))
+    return out
+
+
+def local():
+    listed = json.loads(run(["omarchy", "plugin", "list", "--json"], 20) or "[]")
+    placed = bar_entries()
+    found = manifests()
+    out = []
+    for item in listed:
+        pid = item.get("id", "")
+        folder, man = found.get(pid, ("", {}))
+        bar = man.get("barWidget", {}) if isinstance(man.get("barWidget"), dict) else {}
+        user_plugin = folder.startswith(USER_DIR)
+        git = git_state(folder) if user_plugin else None
+        preview = os.path.join(folder, "preview.png") if folder else ""
+        out.append({
+            "id": pid, "name": item.get("name") or man.get("name") or pid, "kinds": item.get("kinds") or man.get("kinds") or [],
+            "enabled": bool(item.get("enabled")), "active": bool(item.get("active")),
+            "canDisable": bool(item.get("canDisable", True)), "firstParty": bool(item.get("firstParty")),
+            "clonedFrom": item.get("clonedFrom") or "", "version": man.get("version", ""),
+            "author": man.get("author", ""), "description": man.get("description") or bar.get("description", ""),
+            "category": bar.get("category", ""), "license": man.get("license", ""),
+            "homepage": man.get("homepage") or man.get("repository") or (git or {}).get("remote", ""),
+            "folder": folder, "userPlugin": user_plugin, "git": git, "settings": bool(bar.get("schema")),
+            "preview": preview if preview and os.path.exists(preview) else "", "self": pid == SELF,
+            "schema": bar.get("schema") if isinstance(bar.get("schema"), list) else [],
+            "bar": {"section": placed[pid][0], "index": placed[pid][1]} if pid in placed else None,
+            "values": dict((bar.get("defaults") if isinstance(bar.get("defaults"), dict) else {}),
+                           **(placed[pid][2] if pid in placed else {})),
+        })
+    out.sort(key=lambda p: (p["firstParty"], p["name"].lower()))
+    return out
+
+
+# ---------------------------------------------------------------- catalog
+
+GITHUB_API = "https://api.github.com/repos/"
+
+
+def fetch(url, limit, headers=None):
+    if not (url.startswith(HOST + "/") or url == STATS_URL or url.startswith(GITHUB_API)):
+        raise ValueError("only " + HOST + ", the stats API and GitHub's API are fetched")
+    request = urllib.request.Request(url, headers=dict({"User-Agent": "omnisystem-center"}, **(headers or {})))
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            if response.geturl().split("/")[2] != url.split("/")[2]:
+                raise ValueError("redirected to another host")
+            size = int(response.headers.get("Content-Length") or 0)
+            if size > limit:
+                raise ValueError("too large")
+            body = response.read(limit + 1)
+            if len(body) > limit:
+                raise ValueError("too large")
+            return 200, body, response.headers
+    except urllib.error.HTTPError as error:
+        if error.code == 304:
+            return 304, b"", error.headers
+        raise
+
+
+def catalog(refresh):
+    path = os.path.join(CACHE, "catalog.json")
+    meta_path = os.path.join(CACHE, "catalog.meta.json")
+    meta = read_json(meta_path, {}) or {}
+    cached = read_json(path)
+    if meta.get("format") != CACHE_FORMAT:
+        cached, meta = None, {}
+    fresh = cached is not None and time.time() - meta.get("checked", 0) < 600
+    offline = False
+    if refresh or not fresh:
+        headers = {}
+        if cached is not None and meta.get("etag"):
+            headers["If-None-Match"] = meta["etag"]
+        if cached is not None and meta.get("modified"):
+            headers["If-Modified-Since"] = meta["modified"]
+        try:
+            code, body, head = fetch(HOST + "/catalog.json", CATALOG_MAX, headers)
+            if code == 200:
+                feed = json.loads(body.decode("utf-8"))
+                plugins = feed.get("plugins", feed) if isinstance(feed, dict) else feed
+                cached = [{k: p.get(k) for k in KEEP} for p in plugins if isinstance(p, dict) and p.get("id")]
+                write_json(path, cached)
+                meta = {"etag": head.get("ETag", ""), "modified": head.get("Last-Modified", ""), "format": CACHE_FORMAT}
+            meta["checked"] = time.time()
+            write_json(meta_path, meta)
+        except (OSError, ValueError, urllib.error.URLError):
+            offline = True
+    return {"plugins": cached or [], "offline": offline, "checked": int(meta.get("checked", 0) * 1000)}
+
+
+def cached_image(rel, folder, limit):
+    """A catalog image (a path on the marketplace host) as a local file, or ""."""
+    if not rel or not re.fullmatch(r"[A-Za-z0-9_./-]+\.(?:webp|png|jpe?g)", rel) or ".." in rel:
+        return ""
+    os.makedirs(folder, exist_ok=True)
+    target = os.path.join(folder, re.sub(r"[^A-Za-z0-9_.-]", "_", rel))
+    if os.path.exists(target):
+        return target
+    try:
+        code, body, _ = fetch(HOST + "/" + rel.lstrip("/"), limit)
+    except (OSError, ValueError, urllib.error.URLError):
+        return ""
+    # Only an image: WebP, PNG or JPEG by its first bytes.
+    if code != 200 or (body[:4] not in (b"RIFF", b"\x89PNG") and body[:3] != b"\xff\xd8\xff"):
+        return ""
+    with open(target + ".tmp", "wb") as handle:
+        handle.write(body)
+    os.replace(target + ".tmp", target)
+    return target
+
+
+def catalog_entry(pid):
+    for p in read_json(os.path.join(CACHE, "catalog.json"), []) or []:
+        if p.get("id") == pid:
+            return p
+    return {}
+
+
+def thumbs(ids):
+    by_id = {p["id"]: p for p in read_json(os.path.join(CACHE, "catalog.json"), []) or []}
+    folder = os.path.join(CACHE, "thumbs")
+
+    def one(pid):
+        return pid, cached_image((by_id.get(pid) or {}).get("previewThumbnail") or "", folder, THUMB_MAX)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        return dict(pool.map(one, ids[:60]))
+
+
+def preview(pid):
+    entry = catalog_entry(pid)
+    return {"id": pid, "file": cached_image(entry.get("previewImage") or entry.get("previewThumbnail") or "",
+                                            os.path.join(CACHE, "previews"), PREVIEW_MAX)}
+
+
+def stats(refresh):
+    path = os.path.join(CACHE, "stats.json")
+    cached = read_json(path)
+    fresh = cached is not None and time.time() - os.path.getmtime(path) < STATS_TTL
+    if refresh or not fresh:
+        try:
+            code, body, _ = fetch(STATS_URL, STATS_MAX)
+            data = json.loads(body.decode("utf-8")) if code == 200 else None
+            if isinstance(data, dict) and isinstance(data.get("plugins"), dict):
+                cached = {pid: {"hearts": int(v.get("hearts") or 0), "views": int(v.get("views") or 0),
+                                "installs": int(v.get("copies") or 0)}
+                          for pid, v in data["plugins"].items() if isinstance(v, dict)}
+                write_json(path, cached)
+        except (OSError, ValueError, urllib.error.URLError):
+            pass
+    return cached or {}
+
+
+def changes(pid):
+    """What `omarchy plugin update` would bring: the commits between the
+    checkout and the remote's head, and the files they touch, from GitHub's
+    compare API. Read-only; nothing is downloaded into the plugin."""
+    folder, _ = manifests().get(pid, ("", {}))
+    git = git_state(folder) if folder else None
+    if not git or not git["head"]:
+        return {"ok": False, "error": "not a git checkout"}
+    m = re.match(r"(?:https://github\.com/|git@github\.com:)([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$", git["remote"])
+    if not m:
+        return {"ok": False, "error": "only GitHub repositories can be previewed"}
+    latest = ((updates(False).get("plugins") or {}).get(pid) or {}).get("latest") or ""
+    if not latest:
+        out = run(["git", "-C", folder, "ls-remote", "origin", "HEAD"], 15) or ""
+        latest = out.split()[0] if out.split() else ""
+    if not latest or latest == git["head"]:
+        return {"ok": True, "commits": [], "files": [], "behind": 0}
+    url = GITHUB_API + m.group(1) + "/" + m.group(2) + "/compare/" + git["head"] + "..." + latest
+    try:
+        code, body, _ = fetch(url, 4 * 1024 * 1024, {"Accept": "application/vnd.github+json"})
+        data = json.loads(body.decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return {"ok": False, "error": "this checkout holds commits GitHub does not have (made here?), so there is nothing to compare"}
+        return {"ok": False, "error": "GitHub answered " + str(error.code) + (" (its rate limit, try in an hour)" if error.code == 403 else "")}
+    except (OSError, ValueError, urllib.error.URLError) as error:
+        return {"ok": False, "error": "GitHub did not answer (" + str(error)[:80] + ")"}
+    commits = [{"sha": c.get("sha", "")[:7], "message": ((c.get("commit") or {}).get("message") or "").split("\n")[0][:160],
+                "author": ((c.get("commit") or {}).get("author") or {}).get("name", ""),
+                "date": (((c.get("commit") or {}).get("author") or {}).get("date") or "")[:10]}
+               for c in (data.get("commits") or [])][-30:]
+    files = [{"name": f.get("filename", ""), "status": f.get("status", ""), "added": f.get("additions", 0),
+              "removed": f.get("deletions", 0)} for f in (data.get("files") or [])][:60]
+    return {"ok": True, "behind": data.get("ahead_by", len(commits)), "commits": list(reversed(commits)), "files": files,
+            "from": git["head"][:7], "to": latest[:7]}
+
+
+def updates(refresh):
+    path = os.path.join(CACHE, "updates.json")
+    cached = read_json(path, {}) or {}
+    if not refresh and time.time() - cached.get("checked", 0) < UPDATE_TTL:
+        return cached
+    found = manifests()
+    targets = []
+    for pid, (folder, _) in found.items():
+        if folder.startswith(USER_DIR) and os.path.isdir(os.path.join(folder, ".git")):
+            targets.append((pid, folder))
+
+    def one(item):
+        pid, folder = item
+        head = (run(["git", "-C", folder, "rev-parse", "HEAD"], 3) or "").strip()
+        remote = run(["git", "-C", folder, "ls-remote", "origin", "HEAD"], 15) or ""
+        latest = remote.split()[0] if remote.split() else ""
+        return pid, {"head": head, "latest": latest, "update": bool(head and latest and head != latest)}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        result = dict(pool.map(one, targets))
+    data = {"checked": time.time(), "plugins": result}
+    write_json(path, data)
+    return data
+
+
+# -------------------------------------------------------------------- job
+
+ACTIONS = ("install", "remove", "update", "enable", "disable")
+
+
+def pin_commit(pid, sha, log):
+    """Check the just-added plugin out at the marketplace's reviewed commit,
+    fetching only that object. True when HEAD is that commit afterwards."""
+    folder = os.path.join(USER_DIR, pid)
+    if not os.path.isdir(os.path.join(folder, ".git")):
+        folder, _ = manifests().get(pid, ("", {}))
+    if not folder or not os.path.isdir(os.path.join(folder, ".git")):
+        log("No git checkout to pin.")
+        return False
+    if (run(["git", "-C", folder, "rev-parse", "HEAD"], 5) or "").strip() == sha:
+        return True
+    log("Pinning to the reviewed commit " + sha[:7] + "…")
+    if run(["git", "-C", folder, "fetch", "--quiet", "--depth", "1", "origin", sha], 120) is None:
+        log("The reviewed commit could not be fetched (rewritten history?).")
+        return False
+    if run(["git", "-C", folder, "-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", sha], 30) is None:
+        log("Could not check the reviewed commit out.")
+        return False
+    return (run(["git", "-C", folder, "rev-parse", "HEAD"], 5) or "").strip() == sha
+
+
+def job(action, pid, repo, pin=""):
+    if action not in ACTIONS:
+        return fail("unknown action " + action)
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", pid):
+        return fail("not a plugin id")
+    if pid == SELF and action in ("remove", "disable"):
+        return fail("OmniSystem Center cannot remove or disable itself from its own panel")
+    if action == "install":
+        if not re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?(?:\.git)?/?", repo or ""):
+            return fail("only GitHub repositories from the catalog are installed")
+        if pin and not re.fullmatch(r"[0-9a-f]{40}", pin):
+            return fail("a pinned commit is 40 hex characters")
+        # Pinned: added switched off, moved to the reviewed commit, verified,
+        # and only then enabled, so the newer unreviewed code never runs.
+        argv = ["omarchy", "plugin", "add", repo, "--yes"] if pin else ["omarchy", "plugin", "add", repo, "--enable", "--yes"]
+    elif action == "remove":
+        argv = ["omarchy", "plugin", "remove", pid, "--yes"]
+    elif action == "update":
+        argv = ["omarchy", "plugin", "update", pid, "--yes"]
+    else:
+        argv = ["omarchy", "plugin", action, pid]
+    os.makedirs(RUNTIME, mode=0o700, exist_ok=True)
+    state = {"action": action, "id": pid, "state": "running", "started": int(time.time() * 1000), "log": ""}
+
+    def save():
+        # In place, not a rename, so a FileView watching it keeps watching.
+        with open(JOB, "w", encoding="utf-8") as handle:
+            json.dump(state, handle)
+
+    save()
+    try:
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        lines = []
+        for raw in proc.stdout:
+            lines.append(raw.decode("utf-8", "replace").rstrip())
+            state["log"] = "\n".join(lines[-40:])[-6000:]
+            save()
+        code = proc.wait(timeout=600)
+    except (OSError, subprocess.SubprocessError) as error:
+        code = 1
+        state["log"] += "\n" + str(error)
+
+    def log(line):
+        state["log"] = (state["log"] + "\n" + line).strip()[-6000:]
+        save()
+
+    if code == 0 and action == "install" and pin:
+        if pin_commit(pid, pin, log):
+            log("Pinned at " + pin[:7] + "; enabling.")
+            run(["omarchy-shell", "shell", "rescanPlugins"], 20)
+            code = 0 if run(["omarchy", "plugin", "enable", pid], 60) is not None else 1
+            if code:
+                log("Enabling failed; it is installed but off.")
+        else:
+            log("Removing it again: only the reviewed commit is installed this way.")
+            run(["omarchy", "plugin", "remove", pid, "--yes"], 120)
+            code = 1
+    state["state"] = "done" if code == 0 else "failed"
+    state["finished"] = int(time.time() * 1000)
+    save()
+    # The rescan closed the panel: open the Plugins tab again once the shell
+    # answers (a summon during the reload is dropped, so try a few times).
+    for _ in range(10):
+        time.sleep(1.5)
+        if run(["omarchy-shell", "omnisystem-center", "status"], 5) is not None:
+            run(["omarchy-shell", "omnisystem-center", "show", "plugins"], 5)
+            break
+    for name in ("updates.json",):
+        try:
+            os.unlink(os.path.join(CACHE, name))
+        except OSError:
+            pass
+    return 0 if code == 0 else 1
+
+
+def fail(reason):
+    print(json.dumps({"ok": False, "error": reason}))
+    return 2
+
+
+def main(argv):
+    command = argv[1] if len(argv) > 1 else ""
+    refresh = "--refresh" in argv
+    if command == "local":
+        print(json.dumps(local()))
+        return 0
+    if command == "catalog":
+        print(json.dumps(catalog(refresh)))
+        return 0
+    if command == "thumbs":
+        print(json.dumps(thumbs(argv[2:])))
+        return 0
+    if command == "preview" and len(argv) == 3:
+        print(json.dumps(preview(argv[2])))
+        return 0
+    if command == "stats":
+        print(json.dumps(stats(refresh), separators=(",", ":")))
+        return 0
+    if command == "changes" and len(argv) == 3:
+        print(json.dumps(changes(argv[2])))
+        return 0
+    if command == "updates":
+        print(json.dumps(updates(refresh)))
+        return 0
+    if command == "job" and len(argv) >= 4:
+        return job(argv[2], argv[3], argv[4] if len(argv) > 4 else "", argv[5] if len(argv) > 5 else "")
+    print(__doc__.split("\n\n")[1], file=sys.stderr)
+    return 64
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

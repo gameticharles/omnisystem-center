@@ -1,0 +1,106 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --bg: #0b0b0d;
+    --line: #28282c;
+    --text: #e3e2e2;
+    --muted: #9a9aa0;
+    --accent: #e68e0d;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 2000px; height: 1400px; background: var(--bg); }
+  body {
+    font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", monospace;
+    color: var(--text);
+    padding: 50px 70px 0;
+    background:
+      radial-gradient(1200px 520px at 78% -8%, rgba(230, 142, 13, 0.16), transparent 70%),
+      radial-gradient(900px 500px at 0% 105%, rgba(230, 142, 13, 0.07), transparent 70%),
+      var(--bg);
+  }
+  header { display: flex; align-items: flex-end; justify-content: space-between; gap: 40px; }
+  .brand { display: flex; align-items: center; gap: 28px; }
+  .icon {
+    width: 104px; height: 104px; border: 3px solid var(--accent); border-radius: 18px;
+    display: grid; place-items: center; font-size: 62px; color: var(--accent);
+    background: rgba(230, 142, 13, 0.08);
+  }
+  h1 { font-size: 86px; font-weight: 800; letter-spacing: -2px; line-height: 1; }
+  h1 span { color: var(--accent); }
+  .tagline { margin-top: 14px; font-size: 30px; color: var(--muted); }
+  .pills { display: flex; gap: 12px; flex-wrap: wrap; justify-content: flex-end; max-width: 640px; }
+  .pill {
+    font-size: 21px; padding: 9px 16px; border: 1.5px solid var(--line);
+    color: var(--muted); border-radius: 6px; background: rgba(255, 255, 255, 0.02);
+  }
+  .pill.on { border-color: var(--accent); color: var(--accent); }
+
+  .shots { display: flex; gap: 30px; margin-top: 40px; }
+  figure { width: 580px; }
+  figcaption { display: flex; align-items: baseline; gap: 14px; margin-bottom: 14px; }
+  figcaption b { font-size: 25px; color: var(--accent); letter-spacing: 3px; }
+  figcaption span { font-size: 21px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .shots { justify-content: space-between; }
+  figure img {
+    display: block; width: 580px; height: 780px; object-fit: cover; object-position: top;
+    border-radius: 4px;
+    box-shadow: 0 30px 60px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.03);
+  }
+
+  .features {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 26px 40px;
+    margin-top: 34px; padding-top: 28px; border-top: 1.5px solid var(--line);
+  }
+  .f { display: flex; gap: 18px; align-items: flex-start; }
+  .f i { font-style: normal; font-size: 34px; color: var(--accent); flex: 0 0 46px; text-align: center; line-height: 1.15; }
+  .f b { display: block; font-size: 24px; margin-bottom: 5px; }
+  .f p { font-size: 19.5px; color: var(--muted); line-height: 1.4; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="icon">󰂄</div>
+      <div>
+        <h1>OmniSystem <span>Center</span></h1>
+        <p class="tagline">Battery, energy, sensors, processes, ports and plugins in one panel.</p>
+      </div>
+    </div>
+    <div class="pills">
+      <span class="pill on">Replaces the Power widget</span>
+      <span class="pill">Energy &amp; cost</span>
+      <span class="pill">Every GPU</span>
+      <span class="pill">Charge limit</span>
+      <span class="pill">Gadget batteries</span>
+      <span class="pill">Processes · Ports · Plugins</span>
+    </div>
+  </header>
+
+  <section class="shots">
+    <figure>
+      <figcaption><b>OVERVIEW</b><span>battery, gadgets, profiles, power</span></figcaption>
+      <img src="overview.png">
+    </figure>
+    <figure>
+      <figcaption><b>ENERGY</b><span>kWh and cost, measured share</span></figcaption>
+      <img src="energy.png">
+    </figure>
+    <figure>
+      <figcaption><b>SYSTEM</b><span>sensors, GPUs, the hardware</span></figcaption>
+      <img src="system.png">
+    </figure>
+  </section>
+
+  <section class="features">
+    <div class="f"><i>󱐋</i><div><b>Live draw in the bar</b><p>What the machine draws, and a GPU icon with its watts while one is awake.</p></div></div>
+    <div class="f"><i>󰠠</i><div><b>Energy and cost</b><p>Per day, week, month and year; never an estimate shown as a measurement.</p></div></div>
+    <div class="f"><i>󰂏</i><div><b>Charge care</b><p>Limit, sailing, top-up, heat protection and calibration where the hardware allows.</p></div></div>
+    <div class="f"><i>󰋋</i><div><b>Gadget batteries</b><p>Mice, keyboards, headsets and earbuds, per earbud and case.</p></div></div>
+    <div class="f"><i>󰀪</i><div><b>Warnings that stick</b><p>Low and critical levels, with a countdown you can cancel.</p></div></div>
+    <div class="f"><i>󰐥</i><div><b>Power at hand</b><p>Profiles per power source, keep awake, sleep timer, lock to shutdown.</p></div></div>
+  </section>
+</body>
+</html>

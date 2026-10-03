@@ -1,0 +1,362 @@
+#!/usr/bin/env python3
+"""Listening ports for OmniSystem Center's Ports tab.
+
+    omnisystem-center-ports scan               every listener as JSON
+    omnisystem-center-ports stop-container ID  stop a Docker or Podman container that publishes a port
+
+`ss` names a socket by a PID and a thread name, so a Vite server reads
+`node` and a Django one `python3`. This reads the command line and the
+working directory behind each PID, walks up to the project's root (the
+nearest .git, package.json, Cargo.toml, go.mod, pyproject.toml, …), and
+reports `5173 · Vite` in `my-app`. Sockets of root or other users show no
+process to a normal user; those are named from a table of well-known ports,
+marked as a guess. Published container ports are named after the container
+and its Compose project.
+
+Every listener says how far it reaches: `local` (loopback), `vpn`
+(Tailscale, NetBird, WireGuard addresses), `containers` (a Docker bridge)
+or `network` (any address, or one on the LAN).
+
+Stopping a process is done by `omnisystem-center-procs signal`, which checks
+the PID's start time first. Nothing here needs root.
+
+OMNISYSTEM_PORTS_SS (a file) replaces `ss` output for the tests.
+"""
+import ipaddress
+import json
+import os
+import pwd
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+PROC = "/proc"
+TICK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+MAX_OUTPUT = 4 * 1024 * 1024
+MAX_LISTENERS = 512
+
+PROJECT_MARKERS = (".git", "package.json", "Cargo.toml", "go.mod", "pyproject.toml", "composer.json", "Gemfile",
+                   "mix.exs", "pom.xml", "build.gradle", "deno.json", "deno.jsonc", "manage.py", "pubspec.yaml",
+                   "requirements.txt", "Makefile")
+
+# (pattern in the command line, label, icon); first match wins.
+STACKS = [
+    (r"\bvite\b", "Vite", "󱐋"), (r"\bnext(?:-server| dev| start|/dist)", "Next.js", "󰰔"),
+    (r"\bnuxt", "Nuxt", "󱄆"), (r"\bastro\b", "Astro", "󱓞"), (r"\bremix\b", "Remix", "󰜫"),
+    (r"\bsvelte-?kit|\bsvelte\b", "SvelteKit", "󰜫"), (r"@angular|\bng serve", "Angular", "󰚲"),
+    (r"webpack|react-scripts", "Webpack", "󰜈"), (r"\bstorybook\b", "Storybook", "󰂺"),
+    (r"\bparcel\b", "Parcel", "󰏗"), (r"\besbuild\b", "esbuild", "󱐋"), (r"\bturbo\b", "Turbo", "󱐋"),
+    (r"\bexpo\b|metro", "Expo", "󰄜"), (r"\bhugo\b", "Hugo", "󰈮"), (r"\bjekyll\b", "Jekyll", "󰈮"),
+    (r"\bzola\b", "Zola", "󰈮"), (r"manage\.py runserver|\bdjango", "Django", "󰌠"),
+    (r"\buvicorn\b", "Uvicorn", "󰌠"), (r"\bgunicorn\b", "Gunicorn", "󰌠"), (r"\bflask\b", "Flask", "󰌠"),
+    (r"\bfastapi\b", "FastAPI", "󰌠"), (r"\bjupyter", "Jupyter", "󰠮"), (r"-m http\.server", "Python HTTP", "󰌠"),
+    (r"\brails\b|\bpuma\b", "Rails", "󰴭"), (r"\bphp\b.*-S |artisan serve", "PHP", "󰌟"),
+    (r"\bmix phx|phoenix", "Phoenix", "󰬐"), (r"\bspring|\.jar\b", "Java", "󰬷"),
+    (r"\bflutter\b|dart", "Flutter", "󱗆"), (r"\bcargo\b|target/(?:debug|release)/", "Rust", "󱘗"),
+    (r"\bgo run\b|/go-build", "Go", "󰟓"), (r"\bbun\b", "Bun", "󰚩"), (r"\bdeno\b", "Deno", "󰛦"),
+    (r"\bnode\b|\bnpm\b|\bpnpm\b|\byarn\b", "Node", "󰎙"), (r"\bpython", "Python", "󰌠"),
+    (r"\bruby\b", "Ruby", "󰴭"), (r"\bdotnet\b", ".NET", "󰪮"), (r"\bcode-server\b", "code-server", "󰨞"),
+    (r"\bollama\b", "Ollama", "󰚩"), (r"\bsyncthing\b", "Syncthing", "󰓦"), (r"docker-proxy", "Docker", "󰡨"),
+]
+
+# Ports a normal user cannot see the owner of: a well-known service, as a guess.
+KNOWN = {
+    21: "FTP", 22: "SSH", 25: "SMTP", 53: "DNS", 67: "DHCP", 68: "DHCP client", 80: "HTTP", 88: "Kerberos",
+    110: "POP3", 111: "RPC", 123: "NTP", 137: "NetBIOS", 138: "NetBIOS", 139: "SMB", 143: "IMAP", 161: "SNMP",
+    389: "LDAP", 443: "HTTPS", 445: "SMB", 465: "SMTPS", 514: "Syslog", 546: "DHCPv6 client", 547: "DHCPv6",
+    587: "Submission", 631: "CUPS printing", 636: "LDAPS", 853: "DNS over TLS", 873: "rsync", 993: "IMAPS",
+    995: "POP3S", 1194: "OpenVPN", 1433: "SQL Server", 1514: "Wazuh", 1521: "Oracle", 1716: "KDE Connect",
+    1883: "MQTT", 1900: "SSDP", 2049: "NFS", 2375: "Docker", 2376: "Docker TLS", 2379: "etcd", 3128: "Squid",
+    3306: "MySQL", 3389: "RDP", 3478: "STUN", 4369: "Erlang EPMD", 5000: "Dev or AirPlay", 5037: "ADB",
+    5060: "SIP", 5222: "XMPP", 5353: "mDNS", 5355: "LLMNR", 5432: "PostgreSQL", 5672: "RabbitMQ",
+    5900: "VNC", 5938: "TeamViewer", 6379: "Redis", 6443: "Kubernetes", 6600: "MPD", 6881: "BitTorrent",
+    7000: "Cassandra", 7070: "AnyDesk", 7681: "ttyd", 8008: "HTTP alt", 8086: "InfluxDB", 8096: "Jellyfin",
+    8123: "Home Assistant", 8200: "Vault", 8384: "Syncthing GUI", 8443: "HTTPS alt", 8888: "Jupyter",
+    9000: "Dev or PHP-FPM", 9090: "Prometheus", 9092: "Kafka", 9100: "Node exporter", 9200: "Elasticsearch",
+    9418: "git daemon", 11211: "Memcached", 11434: "Ollama", 21027: "Syncthing discovery", 22000: "Syncthing",
+    25565: "Minecraft", 27017: "MongoDB", 32400: "Plex", 41641: "Tailscale", 51820: "WireGuard",
+}
+
+DEV_PORTS = [(1313, 1313), (3000, 3999), (4000, 4999), (5000, 5999), (6006, 6006), (7000, 7999), (8000, 8999),
+             (9000, 9999), (19000, 19006), (24678, 24678)]
+DEV_RUNTIMES = {"node", "bun", "deno", "python", "python3", "ruby", "php", "java", "dotnet", "cargo", "go",
+                "npm", "pnpm", "yarn", "uvicorn", "gunicorn", "flutter", "dart", "hugo", "zola", "jekyll"}
+HTTP_PORTS = {80, 443, 631, 8008, 8080, 8443, 8096, 8123, 8384, 8888, 9090, 32400}
+
+
+def read(path, default=""):
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(MAX_OUTPUT).decode("utf-8", "replace")
+    except OSError:
+        return default
+
+
+def run(argv, timeout=3):
+    try:
+        out = subprocess.run(argv, capture_output=True, timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout[:MAX_OUTPUT].decode("utf-8", "replace") if out.returncode == 0 else None
+
+
+def ss_output():
+    fake = os.environ.get("OMNISYSTEM_PORTS_SS")
+    if fake:
+        return read(fake)
+    return run(["ss", "-H", "-ltnup"]) or ""
+
+
+LINE = re.compile(r"^(tcp|udp)\s+(\S+)\s+\d+\s+\d+\s+(\S+)\s+\S+(?:\s+users:\((.*)\))?\s*$")
+USER = re.compile(r'\("((?:[^"\\]|\\.)*)",pid=(\d+),fd=\d+\)')
+
+
+def split_address(local):
+    """'127.0.0.1:5173', '[::1]:631', '127.0.0.53%lo:53', '*:22' -> (address, port)."""
+    host, _, port = local.rpartition(":")
+    host = host.split("%", 1)[0].strip("[]")
+    if host in ("*", ""):
+        host = "0.0.0.0"
+    try:
+        return host, int(port)
+    except ValueError:
+        return None, None
+
+
+def parse_ss(text):
+    out = []
+    for line in text.splitlines():
+        m = LINE.match(line.strip())
+        if not m:
+            continue
+        proto, state, local, users_text = m.groups()
+        if proto == "tcp" and state != "LISTEN":
+            continue
+        address, port = split_address(local)
+        if port is None:
+            continue
+        procs = [(name, int(pid)) for name, pid in USER.findall(users_text or "")]
+        out.append({"proto": proto, "address": address, "port": port, "procs": procs})
+    return out
+
+
+def vpn_networks():
+    nets = [ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48")]
+    return nets
+
+
+def interface_kinds():
+    """address -> interface name, for telling a VPN or Docker bridge apart."""
+    kinds = {}
+    text = run(["ip", "-o", "addr"]) or ""
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 4:
+            kinds[parts[3].split("/")[0]] = parts[1]
+    return kinds
+
+
+def reach(address, interfaces):
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return "network"
+    if ip.is_loopback:
+        return "local"
+    if ip.is_unspecified:
+        return "network"
+    iface = interfaces.get(address, "")
+    if iface.startswith(("tailscale", "wt", "wg", "nb-", "tun", "zt")) or any(ip in n for n in vpn_networks()):
+        return "vpn"
+    if iface.startswith(("docker", "br-", "podman", "virbr", "cni")):
+        return "containers"
+    # A bridge that is down is not listed by `ip`; Docker's default range is.
+    if not iface and ip.version == 4 and ip in ipaddress.ip_network("172.16.0.0/12"):
+        return "containers"
+    if ip.is_link_local:
+        return "local-link"
+    return "network"
+
+
+REACH_ORDER = {"local": 0, "local-link": 1, "containers": 2, "vpn": 3, "network": 4}
+
+
+def process(pid, cache):
+    if pid in cache:
+        return cache[pid]
+    base = os.path.join(PROC, str(pid))
+    stat = read(os.path.join(base, "stat"))
+    right = stat.rfind(")")
+    fields = stat[right + 2:].split() if right > 0 else []
+    uid = None
+    for line in read(os.path.join(base, "status")).splitlines():
+        if line.startswith("Uid:"):
+            uid = int(line.split()[1])
+    cmd = " ".join(read(os.path.join(base, "cmdline")).replace("\0", " ").split())[:2000]
+    try:
+        cwd = os.readlink(os.path.join(base, "cwd"))
+    except OSError:
+        cwd = ""
+    try:
+        user = pwd.getpwuid(uid).pw_name if uid is not None else ""
+    except KeyError:
+        user = str(uid)
+    booted = 0
+    for line in read(os.path.join(PROC, "stat")).splitlines():
+        if line.startswith("btime "):
+            booted = int(line.split()[1])
+    start = int(fields[19]) if len(fields) > 19 else 0
+    info = {"pid": pid, "cmd": cmd, "cwd": cwd, "uid": uid, "user": user, "mine": uid == os.getuid(),
+            "start": start, "started": int(booted + start / TICK) if start else 0,
+            "name": stat[stat.find("(") + 1:right] if right > 0 else ""}
+    cache[pid] = info
+    return info
+
+
+def project_root(cwd):
+    """The nearest folder above `cwd` holding a project marker, never $HOME or /."""
+    home = os.path.expanduser("~")
+    path = os.path.abspath(cwd or "")
+    for _ in range(12):
+        if not path or path in ("/", home):
+            return ""
+        if any(os.path.exists(os.path.join(path, m)) for m in PROJECT_MARKERS):
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            return ""
+        path = parent
+    return ""
+
+
+def stack_of(cmd, name):
+    text = (cmd or name or "").lower()
+    for pattern, label, icon in STACKS:
+        if re.search(pattern, text):
+            return label, icon
+    return "", ""
+
+
+def is_dev(port, proc, root, stack=""):
+    """Yours, and in a dev port range, or run by a dev runtime (by program
+    name, or a stack named anywhere in the command line, as Omaports does: an
+    editor's Node service counts), or started inside a project checkout."""
+    in_range = any(lo <= port <= hi for lo, hi in DEV_PORTS)
+    runtime = bool(proc) and (os.path.basename(proc["cmd"].split(" ")[0] if proc["cmd"] else "") in DEV_RUNTIMES
+                              or proc["name"] in DEV_RUNTIMES or bool(stack and stack != "Docker"))
+    return bool(proc) and proc["mine"] and (in_range or runtime or bool(root))
+
+
+def containers():
+    """host port -> {id, name, project, image} for running Docker or Podman containers."""
+    out = {}
+    for tool in ("docker", "podman"):
+        if not shutil.which(tool):
+            continue
+        text = run([tool, "ps", "--format", "{{json .}}"], timeout=4)
+        if not text:
+            continue
+        for line in text.splitlines():
+            try:
+                c = json.loads(line)
+            except ValueError:
+                continue
+            labels = c.get("Labels") or ""
+            project = ""
+            if isinstance(labels, dict):
+                project = labels.get("com.docker.compose.project", "")
+            else:
+                m = re.search(r"com\.docker\.compose\.project=([^,]+)", labels)
+                project = m.group(1) if m else ""
+            ports = c.get("Ports") or ""
+            if isinstance(ports, list):
+                ports = ", ".join(str(p) for p in ports)
+            for m in re.finditer(r"(?:[\d.]+|\[?::\]?):(\d+)->(\d+)/(tcp|udp)", ports):
+                out[(int(m.group(1)), m.group(3))] = {"id": str(c.get("ID", ""))[:64], "name": c.get("Names", ""),
+                                                      "project": project, "image": c.get("Image", ""), "tool": tool}
+    return out
+
+
+def scan():
+    interfaces = interface_kinds()
+    cache = {}
+    published = containers()
+    merged = {}
+    for item in parse_ss(ss_output()):
+        pids = [pid for _, pid in item["procs"]]
+        key = (item["proto"], item["port"], tuple(sorted(set(pids))) or ("?",))
+        row = merged.get(key)
+        if not row:
+            row = merged[key] = {"proto": item["proto"], "port": item["port"], "addresses": [], "pids": sorted(set(pids)),
+                                 "names": sorted({n for n, _ in item["procs"]})}
+        if item["address"] not in row["addresses"]:
+            row["addresses"].append(item["address"])
+    rows = []
+    for row in merged.values():
+        proc = process(row["pids"][0], cache) if row["pids"] else None
+        reaches = [reach(a, interfaces) for a in row["addresses"]]
+        widest = max(reaches, key=lambda r: REACH_ORDER.get(r, 4)) if reaches else "local"
+        root = project_root(proc["cwd"]) if proc and proc["mine"] else ""
+        label, icon = stack_of(proc["cmd"] if proc else "", proc["name"] if proc else "")
+        container = published.get((row["port"], row["proto"]))
+        guess = False
+        if container:
+            name, icon, label = container["name"], "󰡨", container["image"].split("/")[-1].split(":")[0]
+        elif proc:
+            name = label or (proc["name"] or row["names"][0] if row["names"] else proc["name"])
+        else:
+            name = KNOWN.get(row["port"], "Unknown")
+            guess = row["port"] in KNOWN
+        owner = "container" if container else ("mine" if proc and proc["mine"] else ("system" if not proc else "other"))
+        rows.append({
+            "proto": row["proto"], "port": row["port"], "addresses": row["addresses"], "reach": widest,
+            "name": name, "guess": guess, "stack": label, "icon": icon or ("󰒍" if not proc else "󰆧"),
+            "owner": owner, "pid": proc["pid"] if proc else None, "start": proc["start"] if proc else None,
+            "started": proc["started"] if proc else None, "process": proc["name"] if proc else "",
+            "cmd": proc["cmd"] if proc else "", "cwd": proc["cwd"] if proc and proc["mine"] else "",
+            "user": proc["user"] if proc else "", "mine": bool(proc and proc["mine"]),
+            "project": os.path.basename(root) if root else (container["project"] if container else ""),
+            "projectPath": root, "container": container,
+            "dev": is_dev(row["port"], proc, root, label) or bool(container),
+            "http": row["proto"] == "tcp" and (row["port"] in HTTP_PORTS or is_dev(row["port"], proc, root, label) or bool(container)),
+        })
+    rows.sort(key=lambda r: (not r["dev"], r["owner"] != "mine", r["proto"] != "tcp", r["port"]))
+    return {"ts": int(time.time() * 1000), "listeners": rows[:MAX_LISTENERS],
+            "docker": any(shutil.which(t) for t in ("docker", "podman"))}
+
+
+def stop_container(cid):
+    if not re.fullmatch(r"[0-9a-f]{6,64}", cid):
+        print(json.dumps({"ok": False, "error": "not a container id"}))
+        return 2
+    for tool in ("docker", "podman"):
+        if not shutil.which(tool):
+            continue
+        state = run([tool, "inspect", "--format", "{{.State.Running}}", cid], timeout=4)
+        if state is None:
+            continue
+        if state.strip() != "true":
+            print(json.dumps({"ok": False, "error": "that container is not running"}))
+            return 3
+        done = run([tool, "stop", cid], timeout=30)
+        print(json.dumps({"ok": done is not None} if done is not None else {"ok": False, "error": tool + " stop failed"}))
+        return 0 if done is not None else 3
+    print(json.dumps({"ok": False, "error": "no container tool answers for that id"}))
+    return 3
+
+
+def main(argv):
+    command = argv[1] if len(argv) > 1 else "scan"
+    if command == "scan":
+        print(json.dumps(scan(), separators=(",", ":")))
+        return 0
+    if command == "stop-container" and len(argv) == 3:
+        return stop_container(argv[2])
+    print(__doc__.split("\n\n")[1], file=sys.stderr)
+    return 64
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

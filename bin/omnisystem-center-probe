@@ -1,0 +1,608 @@
+#!/usr/bin/env python3
+"""What this machine can do, as one JSON object, for OmniSystem Center.
+
+    omnisystem-center-probe            capabilities and battery readings
+    omnisystem-center-probe system     CPU, memory, disk, temperatures and fans (one sample)
+    omnisystem-center-probe device     what the machine is: model, firmware, CPU,
+                                       memory, storage, graphics, network, audio, USB
+
+Everything is read, nothing is changed, and nothing needs root. The service
+calls this and shows each feature only when the hardware offers it: a charge
+limit through UPower (no root, the session is allowed to toggle it), exact
+limits and sailing mode where the kernel's threshold files are writable by
+this user, heat protection where a battery temperature is reported, keyboard
+backlight where a backlight LED exists, clamshell mode where there is a lid.
+
+OMNISYSTEM_SYSFS_ROOT (default /) lets the tests point it at a fake tree.
+"""
+import glob
+import json
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+
+ROOT = os.environ.get("OMNISYSTEM_SYSFS_ROOT", "/")
+
+
+def path(*parts):
+    return os.path.join(ROOT, *[p.lstrip("/") for p in parts])
+
+
+def read(file, default=""):
+    try:
+        with open(file) as handle:
+            return handle.read().strip()
+    except OSError:
+        return default
+
+
+def number(value, default=0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def writable(file):
+    return os.path.exists(file) and os.access(file, os.W_OK)
+
+
+def threshold_node(file):
+    if not os.path.exists(file):
+        return None
+    return {"path": file, "value": int(number(read(file), -1)), "writable": writable(file)}
+
+
+def battery_dir():
+    for candidate in sorted(glob.glob(path("sys/class/power_supply/*"))):
+        if read(os.path.join(candidate, "type")) == "Battery" and read(os.path.join(candidate, "scope")) != "Device":
+            return candidate
+    return ""
+
+
+BATTERY_FILES = ("energy_full", "energy_full_design", "energy_now", "charge_full",
+                 "charge_full_design", "charge_now", "cycle_count", "voltage_now",
+                 "voltage_min_design", "current_now", "power_now", "temp", "capacity",
+                 "manufacturer", "model_name", "technology", "status",
+                 "charge_control_end_threshold", "charge_control_start_threshold")
+
+
+APPLE_LIMITS = ("sys/bus/acpi/devices/APP0001:00/battery_charge_limit",
+                "sys/devices/LNXSYSTM:00/LNXSYBUS:00/PNP0A08:00/device:1c/APP0001:00/battery_charge_limit")
+ACER_HEALTH = "sys/bus/wmi/drivers/acer-wmi-battery/health_mode"
+
+
+def upower_device():
+    if not shutil.which("upower"):
+        return ""
+    try:
+        out = subprocess.run(["upower", "-e"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    for line in out.splitlines():
+        if "/battery_" in line:
+            return line.strip()
+    return ""
+
+
+def upower_property(device, name):
+    try:
+        out = subprocess.run(["busctl", "get-property", "org.freedesktop.UPower", device,
+                              "org.freedesktop.UPower.Device", name],
+                             capture_output=True, text=True, timeout=5).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if len(out) < 2:
+        return None
+    kind, value = out[0], out[1]
+    if kind == "b":
+        return value == "true"
+    return number(value, None)
+
+
+def upower_threshold():
+    device = upower_device() if not os.environ.get("OMNISYSTEM_SYSFS_ROOT") else ""
+    if not device or not shutil.which("busctl"):
+        return {"device": device, "supported": False}
+    supported = upower_property(device, "ChargeThresholdSupported")
+    return {
+        "device": device,
+        "supported": bool(supported),
+        "settings": bool(upower_property(device, "ChargeThresholdSettingsSupported")),
+        "enabled": bool(upower_property(device, "ChargeThresholdEnabled")),
+        "start": int(upower_property(device, "ChargeStartThreshold") or 0),
+        "end": int(upower_property(device, "ChargeEndThreshold") or 0),
+        "temperature": upower_property(device, "Temperature") or 0,
+    }
+
+
+def keyboard_backlight():
+    for led in sorted(glob.glob(path("sys/class/leds/*kbd_backlight*"))):
+        maximum = int(number(read(os.path.join(led, "max_brightness")), 0))
+        if maximum > 0:
+            return {"device": os.path.basename(led), "brightness": int(number(read(os.path.join(led, "brightness")), 0)),
+                    "max": maximum, "writable": writable(os.path.join(led, "brightness"))}
+    return None
+
+
+def lid():
+    states = glob.glob(path("proc/acpi/button/lid/*/state"))
+    if not states:
+        return None
+    text = read(states[0])
+    return {"state": "closed" if "closed" in text else "open"}
+
+
+def sleep_check():
+    """Whether suspend and hibernate are likely to come back, from files only.
+    Omarchy's own check (`omarchy-hibernation-available`) says hibernation is
+    set up; it cannot see a GPU that will lose its state on the way."""
+    image = number(read(path("sys/power/image_size"), ""), 0)
+    swap_kb = 0
+    for line in read(path("proc/swaps")).splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 3 and "zram" not in parts[0]:
+            swap_kb += int(number(parts[2], 0))
+    hibernation = image > 0 and swap_kb * 1024 > image and os.path.exists(path("etc/mkinitcpio.conf.d/omarchy_resume.conf"))
+    resume = "resume=" in read(path("proc/cmdline"))
+    params = read(path("proc/driver/nvidia/params"))
+
+    def wanted(target, unit):
+        return os.path.exists(path("etc/systemd/system", target + ".wants", unit))
+
+    nvidia = None
+    issues = []
+    if params:
+        preserve = "PreserveVideoMemoryAllocations: 1" in params
+        units = {"suspend": wanted("systemd-suspend.service", "nvidia-suspend.service"),
+                 "hibernate": wanted("systemd-hibernate.service", "nvidia-hibernate.service"),
+                 "resume": wanted("systemd-suspend.service", "nvidia-resume.service")
+                           or wanted("systemd-hibernate.service", "nvidia-resume.service")}
+        nvidia = {"preserve": preserve, "units": units}
+        missing = [name for name, on in units.items() if not on]
+        if preserve and missing:
+            issues.append({"id": "nvidia-sleep", "affects": ["suspend", "hibernate"],
+                           "text": "The NVIDIA driver keeps video memory over sleep, but its " + ", ".join(missing)
+                                   + " step" + ("s are" if len(missing) > 1 else " is") + " off: suspend and hibernate may not come back."})
+    if hibernation and not resume:
+        issues.append({"id": "no-resume", "affects": ["hibernate"],
+                       "text": "Hibernation is set up, but the kernel is not told where to resume from (no resume= on its command line)."})
+    return {"hibernation": hibernation, "resume": resume, "nvidia": nvidia, "issues": issues}
+
+
+def capabilities():
+    battery = battery_dir()
+    files = {}
+    if battery:
+        for name in BATTERY_FILES:
+            value = read(os.path.join(battery, name), None)
+            if value is not None:
+                files[name] = value
+    sysfs = {}
+    if battery:
+        for key, names in (("end", ("charge_control_end_threshold", "charge_stop_threshold")),
+                           ("start", ("charge_control_start_threshold", "charge_start_threshold"))):
+            for name in names:
+                node = threshold_node(os.path.join(battery, name))
+                if node:
+                    sysfs[key] = node
+                    break
+    # Acer laptops with the acer-wmi-battery driver: "health mode" holds the
+    # charge at 80% (on or off; the level is the firmware's).
+    node = threshold_node(path(ACER_HEALTH))
+    if node:
+        sysfs["acer"] = node
+    # Apple SMC (T2 Macs). Never walk /sys/devices recursively: its symlinks loop.
+    for candidate in APPLE_LIMITS:
+        node = threshold_node(path(candidate))
+        if node:
+            sysfs["apple"] = node
+            break
+    return {
+        "battery": {"name": os.path.basename(battery), "files": files} if battery else None,
+        "threshold": {"upower": upower_threshold(), "sysfs": sysfs},
+        "keyboard": keyboard_backlight(),
+        "lid": lid(),
+        "sleep": sleep_check(),
+    }
+
+
+# ----------------------------------------------------------------- system
+
+def cpu_temperature():
+    """The CPU package temperature in °C, from the first hwmon that names one."""
+    for hwmon in sorted(glob.glob(path("sys/class/hwmon/hwmon*"))):
+        name = read(os.path.join(hwmon, "name"))
+        if name not in ("coretemp", "k10temp", "zenpower", "cpu_thermal", "acpitz"):
+            continue
+        best = None
+        for label_file in sorted(glob.glob(os.path.join(hwmon, "temp*_label"))):
+            label = read(label_file)
+            if label.startswith(("Package", "Tctl", "Tdie")):
+                best = label_file.replace("_label", "_input")
+                break
+        if not best:
+            inputs = sorted(glob.glob(os.path.join(hwmon, "temp*_input")))
+            best = inputs[0] if inputs else None
+        if best:
+            value = number(read(best), 0)
+            if value > 0:
+                return round(value / 1000, 1)
+    for zone in sorted(glob.glob(path("sys/class/thermal/thermal_zone*"))):
+        if read(os.path.join(zone, "type")) in ("x86_pkg_temp", "cpu-thermal"):
+            value = number(read(os.path.join(zone, "temp")), 0)
+            if value > 0:
+                return round(value / 1000, 1)
+    return None
+
+
+def sensors():
+    """Every temperature and fan hwmon reports, with a readable name."""
+    names = {"coretemp": "CPU", "k10temp": "CPU", "zenpower": "CPU", "nvme": "SSD", "amdgpu": "GPU",
+             "acpitz": "Board", "pch_cannonlake": "Chipset", "pch_tigerlake": "Chipset", "pch_skylake": "Chipset",
+             "iwlwifi_1": "Wi-Fi", "mt7921_phy0": "Wi-Fi", "ath11k_hwmon": "Wi-Fi", "thinkpad": "Laptop",
+             "dell_smm": "Laptop", "asus": "Laptop", "spd5118": "Memory", "jc42": "Memory", "r8169": "Ethernet"}
+    temps, fans = [], []
+    for hwmon in sorted(glob.glob(path("sys/class/hwmon/hwmon*")), key=lambda h: int(re.sub(r"\D", "", os.path.basename(h)) or 0)):
+        chip = read(os.path.join(hwmon, "name"))
+        group = names.get(chip) or ("Wi-Fi" if chip.startswith(("iwlwifi", "mt7", "ath")) else
+                                    "Chipset" if chip.startswith("pch_") else chip)
+        readings = []
+        for file in sorted(glob.glob(os.path.join(hwmon, "temp*_input")), key=lambda f: int(re.sub(r"\D", "", os.path.basename(f)) or 0)):
+            value = number(read(file), None)
+            if value is None or value <= 0 or value > 150000:
+                continue
+            label = read(file.replace("_input", "_label"))
+            readings.append({"label": label, "c": round(value / 1000, 1)})
+        if readings:
+            if group == "CPU":
+                package = [r for r in readings if r["label"].startswith(("Package", "Tctl", "Tdie"))]
+                cores = [r["c"] for r in readings if r["label"].startswith("Core")]
+                top = package[0]["c"] if package else max(r["c"] for r in readings)
+                temps.append({"group": "CPU", "label": "Package", "c": top,
+                              "detail": f"hottest core {max(cores):.0f} °C" if cores else ""})
+            elif len(readings) == 1 or group in ("Board", "Wi-Fi", "Chipset"):
+                temps.append({"group": group, "label": readings[0]["label"] or group, "c": max(r["c"] for r in readings), "detail": ""})
+            else:
+                first = readings[0]
+                temps.append({"group": group, "label": first["label"] or group, "c": first["c"],
+                              "detail": ", ".join(f"{r['label'] or 'sensor'} {r['c']:.0f} °C" for r in readings[1:3])})
+        for file in sorted(glob.glob(os.path.join(hwmon, "fan*_input"))):
+            rpm = number(read(file), None)
+            if rpm is None:
+                continue
+            index = "".join(ch for ch in os.path.basename(file) if ch.isdigit())
+            label = read(file.replace("_input", "_label")) or ("Fan " + index).strip()
+            fans.append({"label": label, "rpm": int(rpm)})
+    return temps, fans
+
+
+def cpu_frequencies():
+    current = []
+    for policy in glob.glob(path("sys/devices/system/cpu/cpufreq/policy*")):
+        value = number(read(os.path.join(policy, "scaling_cur_freq")), None)
+        if value:
+            current.append(value / 1000)
+    if not current:
+        return None
+    return {"avg": round(sum(current) / len(current)), "max": round(max(current))}
+
+
+def swaps():
+    out = []
+    for line in read(path("proc/swaps")).splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 4:
+            name = parts[0]
+            out.append({"name": os.path.basename(name), "kind": "zram" if "zram" in name else parts[1],
+                        "size": int(number(parts[2], 0)) * 1024, "used": int(number(parts[3], 0)) * 1024})
+    return out
+
+
+def disk_usage(mount="/"):
+    try:
+        st = os.statvfs(path(mount))
+    except OSError:
+        return None
+    total = st.f_blocks * st.f_frsize
+    free = st.f_bavail * st.f_frsize
+    return {"total": total, "free": free, "used": total - st.f_bfree * st.f_frsize}
+
+
+def system():
+    stat = read(path("proc/stat")).splitlines()
+    cpu = [int(x) for x in stat[0].split()[1:]] if stat and stat[0].startswith("cpu ") else []
+    mem = {}
+    for line in read(path("proc/meminfo")).splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].rstrip(":") in ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree", "Cached", "Buffers"):
+            mem[parts[0].rstrip(":")] = int(parts[1]) * 1024
+    energy = read(path("sys/class/powercap/intel-rapl:0/energy_uj"), None)
+    load = read(path("proc/loadavg")).split()
+    temps, fans = sensors()
+    return {
+        "cpu": cpu,
+        "memory": mem,
+        "cpuTemp": cpu_temperature(),
+        # Package energy in µJ; only readable on some systems. Two samples make watts.
+        "raplEnergy": int(energy) if energy and energy.isdigit() else None,
+        "cores": os.cpu_count() or 1,
+        "load": [number(x, 0) for x in load[:3]] if len(load) >= 3 else [],
+        "uptime": int(number(read(path("proc/uptime")).split(" ")[0], 0)),
+        "freq": cpu_frequencies(),
+        "temps": temps,
+        "fans": fans,
+        "swaps": swaps(),
+        "disk": disk_usage("/"),
+    }
+
+
+# ----------------------------------------------------------------- device
+
+CHASSIS = {"3": "Desktop", "4": "Desktop", "5": "Desktop", "6": "Desktop", "7": "Tower", "8": "Portable",
+           "9": "Laptop", "10": "Notebook", "11": "Handheld", "13": "All-in-one", "14": "Sub-notebook",
+           "15": "Desktop", "16": "Desktop", "17": "Server", "23": "Server", "30": "Tablet", "31": "Convertible",
+           "32": "Detachable", "35": "Mini PC", "36": "Stick PC"}
+PLACEHOLDERS = ("to be filled", "default string", "system product name", "system manufacturer", "not applicable",
+                "not specified", "none", "o.e.m.", "oem", "0123456789", "type1productconfigid")
+
+
+def dmi(name):
+    value = read(path("sys/class/dmi/id", name))
+    text = value.strip()
+    return "" if text.lower().startswith(PLACEHOLDERS) else text
+
+
+def os_release():
+    info = {}
+    for line in read(path("etc/os-release")).splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            info[key] = value.strip().strip('"')
+    return info.get("PRETTY_NAME") or info.get("NAME") or ""
+
+
+def cpu_static():
+    model, vendor, sockets, cores = "", "", set(), set()
+    for block in read(path("proc/cpuinfo")).split("\n\n"):
+        fields = {}
+        for line in block.splitlines():
+            if ":" in line:
+                key, value = line.split(":", 1)
+                fields[key.strip()] = value.strip()
+        if not fields:
+            continue
+        model = model or fields.get("model name", "")
+        vendor = vendor or fields.get("vendor_id", "")
+        sockets.add(fields.get("physical id", "0"))
+        cores.add((fields.get("physical id", "0"), fields.get("core id", fields.get("processor", ""))))
+    base = path("sys/devices/system/cpu/cpu0")
+    freq = lambda name: number(read(os.path.join(base, "cpufreq", name)), None)
+    caches = {}
+    for index in sorted(glob.glob(os.path.join(base, "cache/index*"))):
+        level, kind, size = read(os.path.join(index, "level")), read(os.path.join(index, "type")), read(os.path.join(index, "size"))
+        if not level or not size:
+            continue
+        key = f"L{level}" + ("d" if kind == "Data" else "i" if kind == "Instruction" else "")
+        caches[key] = size
+    lo, hi = freq("cpuinfo_min_freq"), freq("cpuinfo_max_freq")
+    return {
+        "model": re.sub(r"\s+", " ", model).replace("(R)", "").replace("(TM)", "").strip(),
+        "vendor": {"GenuineIntel": "Intel", "AuthenticAMD": "AMD"}.get(vendor, vendor),
+        "sockets": max(1, len(sockets)),
+        "cores": len(cores) or (os.cpu_count() or 1),
+        "threads": os.cpu_count() or 1,
+        "minMHz": round(lo / 1000) if lo else None,
+        "maxMHz": round(hi / 1000) if hi else None,
+        "caches": caches,
+        "driver": read(os.path.join(base, "cpufreq/scaling_driver")),
+        "governor": read(os.path.join(base, "cpufreq/scaling_governor")),
+        "epp": read(os.path.join(base, "cpufreq/energy_performance_preference")),
+        "arch": platform.machine(),
+    }
+
+
+def mount_source(mount="/"):
+    for line in read(path("proc/self/mountinfo")).splitlines():
+        left, _, right = line.partition(" - ")
+        fields = left.split()
+        if len(fields) >= 5 and fields[4] == mount:
+            parts = right.split()
+            return (parts[1] if len(parts) > 1 else ""), (parts[0] if parts else "")
+    return "", ""
+
+
+def whole_disk(block):
+    """Follow LUKS/LVM (dm-*) and partitions down to the physical disk."""
+    seen = 0
+    while block and seen < 8:
+        seen += 1
+        node = path("sys/class/block", block)
+        slaves = sorted(os.listdir(os.path.join(node, "slaves"))) if os.path.isdir(os.path.join(node, "slaves")) else []
+        if slaves:
+            block = slaves[0]
+            continue
+        if os.path.exists(os.path.join(node, "partition")):
+            block = os.path.basename(os.path.dirname(os.path.realpath(node)))
+            continue
+        return block
+    return block
+
+
+def storage():
+    source, fstype = mount_source("/")
+    block = ""
+    if source.startswith("/dev/"):
+        real = os.path.realpath(source) if ROOT == "/" else source
+        block = os.path.basename(real)
+        if block in ("root",) or source.startswith("/dev/mapper/"):
+            name = os.path.basename(source)
+            for dm in glob.glob(path("sys/class/block/dm-*")):
+                if read(os.path.join(dm, "dm/name")) == name:
+                    block = os.path.basename(dm)
+    disk = whole_disk(block) if block else ""
+    node = path("sys/class/block", disk) if disk else ""
+    model = ""
+    if disk:
+        model = read(os.path.join(node, "device/model")) or read(os.path.join(node, "device/name"))
+    size = int(number(read(os.path.join(node, "size")), 0)) * 512 if disk else 0
+    rotational = read(os.path.join(node, "queue/rotational")) == "1" if disk else False
+    kind = "NVMe SSD" if disk.startswith("nvme") else ("Hard disk" if rotational else ("SSD" if disk else ""))
+    return {"model": re.sub(r"\s+", " ", model).strip(), "disk": disk, "size": size, "kind": kind,
+            "fs": fstype, "encrypted": "crypt" in read(os.path.join(path("sys/class/block", block), "dm/uuid")).lower() if block.startswith("dm-") else False}
+
+
+_PCI_IDS = None
+
+
+def pci_names():
+    """Vendor and device names from hwdata's pci.ids (no hardware is touched)."""
+    global _PCI_IDS
+    if _PCI_IDS is not None:
+        return _PCI_IDS
+    vendors, devices, vendor = {}, {}, None
+    for file in (path("usr/share/hwdata/pci.ids"), path("usr/share/misc/pci.ids")):
+        try:
+            with open(file, encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if not line.strip() or line.startswith("#"):
+                        continue
+                    if line.startswith("C "):
+                        break
+                    if not line.startswith("\t"):
+                        vendor = line[:4].lower()
+                        vendors[vendor] = line[4:].strip()
+                    elif not line.startswith("\t\t") and vendor:
+                        devices[vendor + ":" + line[1:5].lower()] = line[5:].strip()
+            break
+        except OSError:
+            continue
+    _PCI_IDS = (vendors, devices)
+    return _PCI_IDS
+
+
+def short_vendor(name):
+    if "[" in name and name.rstrip().endswith("]"):
+        inner = name[name.rindex("[") + 1:-1]
+        if "/" in inner:
+            inner = inner.split("/")[0]
+        return inner
+    suffixes = ("and subsidiaries", "Corporation", "Corp.", "Inc.", "Co., Ltd.", "Co.,Ltd.", "Ltd.", "Co.", "Semiconductor",
+                "Technologies", "Technology", "Incorporated", "International")
+    name = name.strip()
+    changed = True
+    while changed:
+        changed = False
+        for suffix in suffixes:
+            if name.endswith(suffix) and len(name) > len(suffix):
+                name = name[:-len(suffix)].rstrip(" ,")
+                changed = True
+    return {"MEDIATEK": "MediaTek", "Advanced Micro Devices": "AMD"}.get(name, name)
+
+
+def short_device(name):
+    match = re.search(r"\[([^\]]+)\]\s*$", name)
+    return match.group(1) if match and len(match.group(1)) > 3 else name
+
+
+PCI_CLASSES = {"0300": "Graphics", "0302": "Graphics", "0380": "Graphics", "0200": "Ethernet", "0280": "Wi-Fi",
+               "0403": "Audio", "0401": "Audio", "0c03": None, "0108": None, "0d11": "Bluetooth"}
+
+
+def pci_hardware():
+    vendors, devices = pci_names()
+    out = []
+    for dev in sorted(glob.glob(path("sys/bus/pci/devices/*"))):
+        cls = read(os.path.join(dev, "class"))[2:6].lower()
+        kind = PCI_CLASSES.get(cls)
+        if not kind:
+            continue
+        vid, did = read(os.path.join(dev, "vendor"))[2:].lower(), read(os.path.join(dev, "device"))[2:].lower()
+        vendor = short_vendor(vendors.get(vid, vid))
+        name = short_device(devices.get(vid + ":" + did, did))
+        driver = os.path.basename(os.path.realpath(os.path.join(dev, "driver"))) if os.path.exists(os.path.join(dev, "driver")) else ""
+        state = read(os.path.join(dev, "power/runtime_status"))
+        out.append({"kind": kind, "name": f"{vendor} {name}".strip(), "driver": driver,
+                    "asleep": state == "suspended"})
+    return out
+
+
+def usb_devices():
+    out = []
+    for dev in sorted(glob.glob(path("sys/bus/usb/devices/*"))):
+        base = os.path.basename(dev)
+        if base.startswith("usb") or ":" in base or read(os.path.join(dev, "bDeviceClass")) == "09":
+            continue
+        product = read(os.path.join(dev, "product"))
+        if not product:
+            continue
+        maker = read(os.path.join(dev, "manufacturer"))
+        speed = number(read(os.path.join(dev, "speed")), 0)
+        out.append({"name": product if not maker or maker.lower() in product.lower() else f"{maker} {product}",
+                    "speed": int(speed) if speed else None})
+    return out
+
+
+def battery_static():
+    bat = battery_dir()
+    if not bat:
+        return None
+    return {"name": os.path.basename(bat), "model": read(os.path.join(bat, "model_name")),
+            "maker": read(os.path.join(bat, "manufacturer")), "chemistry": read(os.path.join(bat, "technology"))}
+
+
+def omarchy_version():
+    if ROOT != "/" or not shutil.which("omarchy-version"):
+        return ""
+    try:
+        return subprocess.run(["omarchy-version"], capture_output=True, text=True, timeout=3).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def device():
+    vendor, product = dmi("sys_vendor"), dmi("product_name")
+    family, version = dmi("product_family"), dmi("product_version")
+    mem_total = 0
+    for line in read(path("proc/meminfo")).splitlines():
+        if line.startswith("MemTotal:"):
+            mem_total = int(line.split()[1]) * 1024
+    return {
+        "machine": {
+            "vendor": vendor, "product": product,
+            "family": family if family and family not in product else "",
+            "version": version if version and version not in product else "",
+            "chassis": CHASSIS.get(read(path("sys/class/dmi/id/chassis_type")), ""),
+            "board": " ".join(x for x in (dmi("board_vendor"), dmi("board_name")) if x),
+            "bios": " ".join(x for x in (dmi("bios_vendor"), dmi("bios_version")) if x),
+            "biosDate": dmi("bios_date"),
+            "ec": dmi("ec_firmware_release"),
+        },
+        "os": {"name": os_release(), "kernel": platform.release(), "omarchy": omarchy_version()},
+        "cpu": cpu_static(),
+        "memory": {"total": mem_total},
+        "storage": storage(),
+        "pci": pci_hardware(),
+        "usb": usb_devices(),
+        "battery": battery_static(),
+    }
+
+
+def main(argv):
+    if len(argv) > 1 and argv[1] == "system":
+        print(json.dumps(system()))
+    elif len(argv) > 1 and argv[1] == "device":
+        print(json.dumps(device()))
+    elif len(argv) == 1:
+        print(json.dumps(capabilities()))
+    else:
+        print("usage: omnisystem-center-probe [system|device]", file=sys.stderr)
+        return 64
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

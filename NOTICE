@@ -1,0 +1,133 @@
+OmniSystem Center contains code and ideas adapted from the following
+MIT-licensed projects. Each is used under the MIT License (the same text as
+LICENSE), with the copyright notice below.
+
+Omarchy, the built-in Power widget and Battery service
+  (shell/plugins/panels/power/, shell/plugins/services/battery/,
+  https://github.com/omacom/omarchy)
+  Copyright (c) David Heinemeier Hansson
+  Used in: lib/Model.js (battery icon, mode, charge-threshold detection,
+  profile parsing), views/OverviewView.qml (battery hero, stats, profile
+  picker), Service.qml (low battery warning, profile per power source).
+
+Power Menu, https://github.com/alshareedah22/omarchy-power-menu
+  Copyright (c) 2026 BlackCode
+  Used in: lib/Model.js (the six power actions), Panel.qml (power row and
+  confirmation), Service.qml (suspend and hibernation availability).
+
+Gadget Batteries, https://github.com/69Harold69/omarchy-gadget-batteries
+  Copyright (c) 2026 69Harold69
+  Used in: lib/Model.js (gadget normalisation, merging, charging trends,
+  alerts), bin/omnisystem-center-gadgets, collectors.d/,
+  sources/gfps-daemon, Service.qml (gadget sources), tests/collectors_test.py.
+
+Omaphones for Omarchy, https://github.com/ncr/omarchy-headphones
+  (commit e8546c03b8b7844cfa71d2de7fba245a6b340e02)
+  Copyright (c) 2026 Jacek Becela
+  Used in: sources/gfps-reader (copied unmodified, by way of Gadget
+  Batteries).
+
+PowerCore, https://github.com/gdeyoung/omarchy-powercore
+  Copyright (c) 2026 Greg DeYoung
+  Ideas used in: Service.qml (UPower charge threshold over D-Bus, lid hold
+  through a logind inhibitor, keyboard backlight per power source).
+
+Power Monitor, https://github.com/kinarajv/omarchy-power-monitor
+  Copyright (c) 2026 Kinara Jongga Varga
+  Ideas used in: views/SystemView.qml, bin/omnisystem-center-probe (CPU,
+  memory, temperature and package power readings).
+
+Power Manager, https://github.com/onlyVishesh/omarchy-power-manager
+  Copyright (c) 2026 OnlyVishesh
+  Ideas used in: Service.qml and views/ControlsView.qml (sleep timer, keep
+  awake).
+
+AlDente for Omarchy, https://github.com/monkonthehill/omarchy-aldente
+  Copyright (c) 2026 monkonthehill
+  Ideas used in: bin/omnisystem-center-probe and bin/omnisystem-center-ctl
+  (kernel and Apple SMC charge-limit files), lib/Model.js (sailing, top-up,
+  heat protection, calibration).
+
+Energy Meter, https://github.com/kevzakaria/omarchy-energy-meter
+  (commit 189293f6952f40aa5d841d44a3787be8dc2bccf0)
+  Copyright (c) 2026 Kevin Zakaria
+  Ideas used in: bin/omnisystem-center-energy (storing only measured
+  microjoules and applying the baseline, supply efficiency and price when
+  shown; RAPL package zones only, counter wraps and resets, gaps as
+  untracked time; amdgpu and NVML GPU power; the currency table; coverage
+  per period), views/EnergyView.qml (live draw with a CPU / GPU / rest bar,
+  the measured share, the period filter and breakdown, settings in the
+  panel), docs/energy-meter.md (the read-only RAPL rule and its reasoning).
+
+The System tab's device sections (processor, memory and storage, model and
+firmware, PCI and USB hardware, every thermal sensor, click to copy) were
+suggested by System Information (fred.sysinfo,
+https://github.com/greenermoose/sysinfo-fred-tamlinux). That project is
+GPL-3.0-or-later, so none of its code is used: the feature list was the only
+input, and bin/omnisystem-center-probe's `device` mode was written from the
+kernel's sysfs documentation.
+
+The Processes, Ports and Plugins tabs take ideas (no code was copied) from
+these MIT-licensed plugins, each used under the MIT License with the notice
+below:
+
+SysProcess Manager, https://github.com/joshivivek67/omarchy-sys-process-manager
+  (commit 4f1f88cfb9d82a544f5311e1a3e26f74e007bc93)
+  Copyright (c) 2026 Vivek Joshi
+  Ideas used in: views/ProcessesView.qml (search, filters, ending a process
+  with confirmation). btop inspired the per-sample CPU share, the tree and
+  the sort columns.
+
+Plugin Depot, https://github.com/OmarCodeHub/omarchy-marketplace
+  (commit cb32f665022a1833259ca192fb6d56915cc6f017)
+  Copyright (c) 2026 Omar
+  Ideas used in: bin/omnisystem-center-plugins (a detached job that outlives
+  the rescan and reopens the panel, the conditional catalog download,
+  `git ls-remote` update checks, thumbnails from one fixed host), and
+  views/PluginsView.qml (relevance before the chosen sort, moved-since-review).
+
+Plugin Manager, https://github.com/juancasanueva/omarchy-plugin-manager
+  (commit bfcc1117e935e7c8507d32ea06ef72f822203547)
+  Copyright (c) 2026 Juan Casanueva
+  Ideas used in: views/PluginsView.qml (Installed and Browse, category and
+  status filters, cards with previews, stars and verified marks).
+
+Plugin Control Center, https://github.com/brm-src/plugin-control-center
+  (commit fd4d3f3c62066581ef5886d266530d6a21172c72)
+  Copyright (c) 2026 Cris / brm-src
+  Ideas used in: views/PluginsView.qml (the installed inventory: enabled,
+  third-party, which built-in a plugin replaces; removing only third-party).
+
+Top Bar Plugin Manager, https://github.com/Meenun-123/omarchy-plugin-manager
+  (commit 0b314e9ef67673bb382ef93863af0c0998ee23cf)
+  Copyright (c) 2026 Omarchy Community Contributors
+  Ideas used in: views/PluginsView.qml (an on/off switch per plugin, kind
+  glyphs, the plugin scan over the user and system folders).
+
+Omaports, https://github.com/mich-nduka/omaports
+  (commit d6c5f72816b27e33037e0289e5a21884893e46fe)
+  Copyright (c) 2026 Mich Nduka
+  Ideas used in: bin/omnisystem-center-ports (naming a port by its project
+  root and command line, well-known ports for sockets that cannot be read,
+  dev classification), views/PortsView.qml (dev / mine / exposed / all,
+  groups by project, open, copy, terminal and stop), the bar's port count.
+
+Ports, https://github.com/RohitKaushal7/omarchy-ports
+  (commit 2f8e55164835201d6c8d8725f26b61b900f64f33)
+  Copyright (c) 2026 Rohit Kaushal
+  Ideas used in: bin/omnisystem-center-ports (reach: loopback, LAN, VPN;
+  container ports named by Docker; one row for a v4 and v6 bind).
+
+Portside, https://github.com/Saikomantisu/omarchy-portside
+  (commit f87a5941c0a2229a1dd0c573a24b9f76b4a41fc8)
+  Copyright (c) 2026 Saikomantisu
+  Ideas used in: Service.qml (a notification when a dev server becomes
+  reachable from the network).
+
+Port Manager, https://github.com/AdemBenAbdallah/omarchy-port-manager
+  (commit 2a9620c1c4c01b0b67c3dc006feeacba1a3e47e2)
+  Copyright (c) 2026 Adem Ben Abdallah
+  Ideas used in: bin/omnisystem-center-procs (a PID paired with its start
+  time and signalled through a pidfd), views/PortsView.qml and
+  views/ProcessesView.qml (stopping armed by one click and done by a second,
+  stack glyphs, a red rail for exposed servers).

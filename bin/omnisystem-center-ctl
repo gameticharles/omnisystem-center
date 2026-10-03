@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""The few writes OmniSystem Center makes outside its own state folder.
+
+    omnisystem-center-ctl limit <end> [<start>]   kernel charge thresholds
+    omnisystem-center-ctl apple-limit <end>       Apple SMC charge limit
+    omnisystem-center-ctl upower-limit on|off     UPower's charge limit
+
+Every value is checked here, whatever the caller sends. Kernel files are
+written only when this user may already write them (a udev rule or the
+vendor driver grants that); nothing here asks for more rights. UPower's
+limit goes over D-Bus as the session, which its policy allows for the
+active seat. Exit codes: 0 done, 2 bad input, 3 not supported, 4 not
+permitted.
+
+OMNISYSTEM_SYSFS_ROOT (default /) lets the tests point it at a fake tree.
+"""
+import glob
+import os
+import subprocess
+import sys
+
+ROOT = os.environ.get("OMNISYSTEM_SYSFS_ROOT", "/")
+APPLE_LIMITS = ("sys/bus/acpi/devices/APP0001:00/battery_charge_limit",
+                "sys/devices/LNXSYSTM:00/LNXSYBUS:00/PNP0A08:00/device:1c/APP0001:00/battery_charge_limit")
+
+
+def path(*parts):
+    return os.path.join(ROOT, *[p.lstrip("/") for p in parts])
+
+
+def fail(code, message):
+    print(message, file=sys.stderr)
+    return code
+
+
+def percent(value, low, high):
+    try:
+        number = int(str(value), 10)
+    except ValueError:
+        return None
+    return number if low <= number <= high else None
+
+
+def battery_dir():
+    for candidate in sorted(glob.glob(path("sys/class/power_supply/*"))):
+        try:
+            with open(os.path.join(candidate, "type")) as handle:
+                if handle.read().strip() != "Battery":
+                    continue
+            scope = os.path.join(candidate, "scope")
+            if os.path.exists(scope):
+                with open(scope) as handle:
+                    if handle.read().strip() == "Device":
+                        continue
+        except OSError:
+            continue
+        return candidate
+    return ""
+
+
+def first(directory, names):
+    for name in names:
+        candidate = os.path.join(directory, name)
+        if os.path.exists(candidate):
+            return candidate
+    return ""
+
+
+def write(file, value):
+    if not os.access(file, os.W_OK):
+        raise PermissionError(file)
+    with open(file, "w") as handle:
+        handle.write(str(value))
+
+
+def limit(args):
+    end = percent(args[0], 50, 100) if args else None
+    start = percent(args[1], 0, 99) if len(args) > 1 else None
+    if end is None or (len(args) > 1 and (start is None or start >= end)):
+        return fail(2, "limit wants an end of 50-100 and an optional start below it")
+    battery = battery_dir()
+    end_file = first(battery, ("charge_control_end_threshold", "charge_stop_threshold")) if battery else ""
+    if not end_file:
+        return fail(3, "this battery has no charge threshold")
+    start_file = first(battery, ("charge_control_start_threshold", "charge_start_threshold"))
+    try:
+        # Order matters: the kernel refuses a start at or above the current end
+        # and an end at or below the current start.
+        current_end = int(open(end_file).read().strip() or 100)
+        if start is not None and start_file:
+            if start >= current_end:
+                write(end_file, end)
+                write(start_file, start)
+            else:
+                write(start_file, start)
+                write(end_file, end)
+        else:
+            write(end_file, end)
+    except PermissionError:
+        return fail(4, "the threshold files are not writable by this user")
+    except OSError as error:
+        return fail(3, f"the kernel refused the value: {error.strerror or error}")
+    return 0
+
+
+def apple_limit(args):
+    end = percent(args[0], 20, 100) if args else None
+    if end is None:
+        return fail(2, "apple-limit wants 20-100")
+    for candidate in APPLE_LIMITS:
+        file = path(candidate)
+        if os.path.exists(file):
+            try:
+                write(file, end)
+            except PermissionError:
+                return fail(4, "the Apple charge limit is not writable by this user")
+            except OSError as error:
+                return fail(3, f"the SMC refused the value: {error.strerror or error}")
+            return 0
+    return fail(3, "no Apple charge limit on this machine")
+
+
+def upower_limit(args):
+    if not args or args[0] not in ("on", "off"):
+        return fail(2, "upower-limit wants on or off")
+    out = subprocess.run(["upower", "-e"], capture_output=True, text=True).stdout.split()
+    device = next((d for d in out if "/battery_" in d), "")
+    if not device:
+        return fail(3, "UPower reports no battery")
+    result = subprocess.run(["busctl", "call", "org.freedesktop.UPower", device,
+                             "org.freedesktop.UPower.Device", "EnableChargeThreshold",
+                             "b", "true" if args[0] == "on" else "false"],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        message = (result.stderr or "").strip()
+        return fail(4 if "ccess" in message or "uthoriz" in message else 3, message or "UPower refused")
+    return 0
+
+
+ACER_HEALTH = "sys/bus/wmi/drivers/acer-wmi-battery/health_mode"
+
+
+def acer_health(args):
+    """Acer health mode (acer-wmi-battery): on holds the charge at 80%."""
+    if not args or args[0] not in ("on", "off"):
+        return fail(2, "acer-health wants on or off")
+    file = path(ACER_HEALTH)
+    if not os.path.exists(file):
+        return fail(3, "no Acer health mode on this machine (the acer-wmi-battery driver is not loaded)")
+    try:
+        write(file, "1" if args[0] == "on" else "0")
+    except PermissionError:
+        return fail(4, "the Acer health mode file is not writable by this user")
+    except OSError as error:
+        return fail(3, f"the driver refused the value: {error.strerror or error}")
+    return 0
+
+
+COMMANDS = {"limit": limit, "apple-limit": apple_limit, "upower-limit": upower_limit, "acer-health": acer_health}
+
+
+def main(argv):
+    if len(argv) < 2 or argv[1] not in COMMANDS:
+        return fail(2, "usage: omnisystem-center-ctl limit|apple-limit|upower-limit|acer-health ...")
+    return COMMANDS[argv[1]](argv[2:])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

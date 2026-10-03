@@ -1,0 +1,345 @@
+{
+  "schemaVersion": 1,
+  "id": "omnisystem-center",
+  "name": "OmniSystem Center",
+  "version": "1.0.0",
+  "author": "Charles Gameti",
+  "license": "MIT",
+  "description": "Your machine in one bar widget, replacing Omarchy's Power widget: battery, charge limit (kernel, Apple, UPower, Acer) and its care, low and critical warnings with a sleep-readiness check, power profiles, keep awake and a sleep timer; an energy meter with cost, a monthly budget and CSV export; every sensor and GPU; processes with GPU use, signals and trees; listening ports by project with dev-server rules; an Omarchy plugin manager with the marketplace, pinned installs, update previews, bar layout and widget settings; gadget batteries; and lock to shutdown.",
+  "homepage": "https://github.com/gameticharles/omnisystem-center",
+  "repository": "https://github.com/gameticharles/omnisystem-center",
+  "keywords": [
+    "battery",
+    "power",
+    "charge-limit",
+    "battery-health",
+    "power-profiles",
+    "power-menu",
+    "shutdown",
+    "suspend",
+    "hibernate",
+    "keep-awake",
+    "sleep-timer",
+    "gadgets",
+    "headset",
+    "earbuds",
+    "system-monitor",
+    "energy-meter",
+    "electricity-cost",
+    "power-draw",
+    "gpu",
+    "system-info",
+    "hardware",
+    "process-manager",
+    "ports",
+    "plugin-manager",
+    "control-center",
+    "bar-widget"
+  ],
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.power"
+  },
+  "barWidget": {
+    "displayName": "OmniSystem Center",
+    "description": "Battery and power, energy and cost, sensors, processes, ports, plugins, gadgets and power actions",
+    "category": "System",
+    "aliases": [
+      "battery",
+      "power",
+      "shutdown",
+      "suspend",
+      "charge",
+      "gadgets",
+      "energy",
+      "watts",
+      "gpu",
+      "sysinfo"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "barLabel": "draw",
+      "showPercentage": true,
+      "barGpu": "discrete",
+      "barGpuValue": "usage",
+      "panelWidth": "comfortable",
+      "startTab": "last",
+      "lowLevel": 10,
+      "criticalLevel": 5,
+      "criticalAction": "hibernate",
+      "lowBatteryProfile": 20,
+      "autoProfiles": true,
+      "gadgetLowLevel": 15,
+      "gadgetFullAlert": true,
+      "externalPath": "",
+      "names": {},
+      "systemMonitor": true,
+      "notifications": true,
+      "energyMeter": true,
+      "highWattThreshold": 0,
+      "barPorts": true,
+      "portWatch": true,
+      "processesTab": true,
+      "portsTab": true,
+      "pluginsTab": true,
+      "devPorts": "",
+      "devPrograms": "",
+      "notDevPrograms": ""
+    },
+    "schema": [
+      {
+        "key": "showPercentage",
+        "type": "boolean",
+        "label": "Show the battery percentage",
+        "defaultValue": true,
+        "description": "The charge beside the icon on a battery-powered machine. omarchy-shell omnisystem-center togglePercentage switches it."
+      },
+      {
+        "key": "barLabel",
+        "type": "enum",
+        "label": "Value beside the icon",
+        "options": [
+          "draw",
+          "today",
+          "cost",
+          "watts",
+          "none"
+        ],
+        "defaultValue": "draw",
+        "description": "draw is what the whole machine uses (from the battery on battery, at the socket on AC); today and cost are today's energy and its price; watts is the power in or out of the battery. Right-click the icon to step through them. Vertical bars stay icon-only."
+      },
+      {
+        "key": "barGpu",
+        "type": "enum",
+        "label": "GPU in the bar",
+        "options": [
+          "discrete",
+          "integrated",
+          "both",
+          "off"
+        ],
+        "defaultValue": "discrete",
+        "description": "A card icon for a discrete GPU while it is awake (a sleeping one shows nothing and is never woken), a chip icon for integrated graphics."
+      },
+      {
+        "key": "barGpuValue",
+        "type": "enum",
+        "label": "GPU value",
+        "options": [
+          "usage",
+          "watts",
+          "both"
+        ],
+        "defaultValue": "usage",
+        "description": "How busy the GPU is, what it draws, or both. Integrated graphics report usage only (their power is part of the CPU's)."
+      },
+      {
+        "key": "barPorts",
+        "type": "boolean",
+        "label": "Dev-server count in the bar",
+        "defaultValue": true,
+        "description": "A port icon with the number of dev servers listening, shown even at 0, in the bar's urgent colour while any runs; click it for the Ports tab. Also switchable on the Ports tab. Checked every 20 s."
+      },
+      {
+        "key": "panelWidth",
+        "type": "enum",
+        "label": "Panel width",
+        "options": [
+          "compact",
+          "comfortable",
+          "wide"
+        ],
+        "defaultValue": "comfortable",
+        "description": "compact is 460 px, comfortable 560 px and wide 680 px."
+      },
+      {
+        "key": "startTab",
+        "type": "enum",
+        "label": "Tab shown when the panel opens",
+        "options": [
+          "overview",
+          "care",
+          "insights",
+          "energy",
+          "system",
+          "processes",
+          "ports",
+          "plugins",
+          "controls",
+          "last"
+        ],
+        "defaultValue": "last",
+        "description": "last reopens the tab you left, scrolled where you left it, with its search and filters."
+      },
+      {
+        "key": "lowLevel",
+        "type": "integer",
+        "label": "Low battery warning at (%)",
+        "min": 0,
+        "max": 50,
+        "step": 1,
+        "defaultValue": 10,
+        "description": "Sends Omarchy's low battery notification and runs its battery-low hooks. 0 turns it off."
+      },
+      {
+        "key": "criticalLevel",
+        "type": "integer",
+        "label": "Critical level (%)",
+        "min": 0,
+        "max": 25,
+        "step": 1,
+        "defaultValue": 5,
+        "description": "At this level the critical action below starts, after a 60 second countdown you can cancel. 0 turns it off."
+      },
+      {
+        "key": "criticalAction",
+        "type": "enum",
+        "label": "At the critical level",
+        "options": [
+          "hibernate",
+          "suspend",
+          "none"
+        ],
+        "defaultValue": "hibernate",
+        "description": "hibernate falls back to suspend when hibernation is not set up (omarchy-hibernation-setup); none only warns."
+      },
+      {
+        "key": "lowBatteryProfile",
+        "type": "integer",
+        "label": "Switch to power saver at (%)",
+        "min": 0,
+        "max": 50,
+        "step": 1,
+        "defaultValue": 20,
+        "description": "On battery at this level the power saver profile goes on, and the previous profile comes back once you charge. 0 turns it off."
+      },
+      {
+        "key": "autoProfiles",
+        "type": "boolean",
+        "label": "Profile per power source",
+        "defaultValue": true,
+        "description": "When you plug in or unplug, the profile remembered for that source is applied. Left to Omarchy's own battery service while that is on."
+      },
+      {
+        "key": "gadgetLowLevel",
+        "type": "integer",
+        "label": "Gadget low battery at (%)",
+        "min": 0,
+        "max": 50,
+        "step": 1,
+        "defaultValue": 15,
+        "description": "A notification when a mouse, keyboard, headset or earbud drops to this level. 0 turns it off."
+      },
+      {
+        "key": "gadgetFullAlert",
+        "type": "boolean",
+        "label": "Tell me when a gadget is charged",
+        "defaultValue": true,
+        "description": "Once per charge, when a charging gadget reaches 100%."
+      },
+      {
+        "key": "externalPath",
+        "type": "string",
+        "label": "External gadget file",
+        "defaultValue": "",
+        "description": "A JSON file other tools write gadget levels to. Empty uses ~/.cache/omarchy-accessories/external.json."
+      },
+      {
+        "key": "names",
+        "type": "object",
+        "label": "Gadget names",
+        "defaultValue": {},
+        "description": "Rename gadgets: {\"Reported name\": \"Your name\"}. The panel can also do this."
+      },
+      {
+        "key": "systemMonitor",
+        "type": "boolean",
+        "label": "Show the System tab",
+        "defaultValue": true,
+        "description": "CPU, memory, temperature and power graphs, sampled only while the tab is open."
+      },
+      {
+        "key": "notifications",
+        "type": "boolean",
+        "label": "Notifications",
+        "defaultValue": true,
+        "description": "Charged-to-limit, unplug reminders, heat protection, sleep timer and calibration notes. Low and critical battery warnings are always sent."
+      },
+      {
+        "key": "energyMeter",
+        "type": "boolean",
+        "label": "Energy meter",
+        "defaultValue": true,
+        "description": "Records what the machine uses and costs, per day, week, month and year, while the shell runs. The Energy tab and the draw beside the icon need it."
+      },
+      {
+        "key": "highWattThreshold",
+        "type": "integer",
+        "label": "Highlight the icon at (W)",
+        "min": 0,
+        "max": 5000,
+        "step": 5,
+        "defaultValue": 0,
+        "description": "The icon turns urgent while the machine draws this much or more. 0 turns it off."
+      },
+      {
+        "key": "processesTab",
+        "type": "boolean",
+        "label": "Show the Processes tab",
+        "defaultValue": true,
+        "description": "Every process with CPU, memory, user and command; end, kill, pause or lower its priority. Sampled only while the tab is open."
+      },
+      {
+        "key": "portsTab",
+        "type": "boolean",
+        "label": "Show the Ports tab",
+        "defaultValue": true,
+        "description": "What listens on this machine, by project, and how far it reaches; open, copy or stop it."
+      },
+      {
+        "key": "portWatch",
+        "type": "boolean",
+        "label": "Warn about exposed dev servers",
+        "defaultValue": true,
+        "description": "A notification when a dev server of yours becomes reachable from the network (checked once a minute)."
+      },
+      {
+        "key": "pluginsTab",
+        "type": "boolean",
+        "label": "Show the Plugins tab",
+        "defaultValue": true,
+        "description": "Installed Omarchy plugins (on, off, update, remove) and the marketplace (search, install)."
+      },
+      {
+        "key": "devPorts",
+        "type": "string",
+        "label": "Also dev ports",
+        "defaultValue": "",
+        "description": "Ports or ranges that always count as dev servers when yours, e.g. 33000-34000, 8787."
+      },
+      {
+        "key": "devPrograms",
+        "type": "string",
+        "label": "Always dev programs",
+        "defaultValue": "",
+        "description": "Program names (as the Ports tab shows them) that count as dev servers on any port. The dev button on a port row adds to this."
+      },
+      {
+        "key": "notDevPrograms",
+        "type": "string",
+        "label": "Never dev programs",
+        "defaultValue": "",
+        "description": "Program names that never count as dev servers, whatever the guess. The dev button on a port row adds to this."
+      }
+    ]
+  }
+}

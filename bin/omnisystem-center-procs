@@ -1,0 +1,512 @@
+#!/usr/bin/env python3
+"""Processes for OmniSystem Center's Processes tab.
+
+    omnisystem-center-procs watch [SECONDS]        one JSON line per sample, until stdin closes
+    omnisystem-center-procs once                   one sample (CPU % needs two, so it is 0)
+    omnisystem-center-procs detail PID             working directory, executable, I/O, open files
+    omnisystem-center-procs signal PID START NAME  TERM, KILL, INT, HUP, STOP or CONT
+    omnisystem-center-procs signal-tree PID START NAME  the same to it and every process under it, deepest first
+    omnisystem-center-procs renice PID START NICE  -20..19 (lowering needs root, so it is refused)
+
+Everything is read from /proc, like top and btop: CPU % is the share of one
+core used since the previous sample (so 250% is two and a half cores busy),
+memory is the resident set.
+
+A signal or a nice change names the process by its PID and its start time
+(field 22 of /proc/PID/stat), which together cannot be reused: if the
+process has gone and its PID was handed to another, nothing is sent. The
+signal goes through a pidfd where the kernel has one, so even a PID recycled
+between the check and the signal is not hit. PID 1, other users' processes
+and this tool's own parent chain are refused.
+
+OMNISYSTEM_SYSFS_ROOT (default /) points it at a fake tree for the tests.
+"""
+import ctypes
+import glob
+import json
+import os
+import pwd
+import signal as signals
+import sys
+import time
+
+ROOT = os.environ.get("OMNISYSTEM_SYSFS_ROOT", "/")
+PROC = os.path.join(ROOT, "proc")
+TICK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+PAGE = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+SIGNALS = {"TERM": signals.SIGTERM, "KILL": signals.SIGKILL, "INT": signals.SIGINT,
+           "HUP": signals.SIGHUP, "STOP": signals.SIGSTOP, "CONT": signals.SIGCONT}
+# Ending one of these ends the desktop session; the panel asks twice for them.
+SESSION = {"Hyprland", "hyprland", "quickshell", "qs", "omarchy-shell", "uwsm", "Xwayland", "systemd",
+           "dbus-daemon", "dbus-broker", "pipewire", "wireplumber", "pipewire-pulse", "sddm", "gdm",
+           "greetd", "login", "agetty", "hypridle", "hyprlock", "polkitd", "NetworkManager", "iwd"}
+MAX_CMD = 2000
+
+
+def read(path, default=""):
+    try:
+        with open(path, "rb") as handle:
+            return handle.read().decode("utf-8", "replace")
+    except OSError:
+        return default
+
+
+def users():
+    cache = {}
+
+    def name(uid):
+        if uid not in cache:
+            try:
+                cache[uid] = pwd.getpwuid(uid).pw_name if ROOT == "/" else str(uid)
+            except KeyError:
+                cache[uid] = str(uid)
+        return cache[uid]
+    return name
+
+
+def parse_stat(text):
+    """(comm, fields after comm) from /proc/PID/stat; comm may hold spaces and ')'."""
+    left, right = text.find("("), text.rfind(")")
+    if left < 0 or right < 0:
+        return None, []
+    return text[left + 1:right], text[right + 2:].split()
+
+
+def mem_total():
+    for line in read(os.path.join(PROC, "meminfo")).splitlines():
+        if line.startswith("MemTotal:"):
+            return int(line.split()[1]) * 1024
+    return 0
+
+
+def uptime():
+    try:
+        return float(read(os.path.join(PROC, "uptime")).split()[0])
+    except (IndexError, ValueError):
+        return 0.0
+
+
+def boot_time():
+    for line in read(os.path.join(PROC, "stat")).splitlines():
+        if line.startswith("btime "):
+            return int(line.split()[1])
+    return int(time.time() - uptime())
+
+
+def sample(username, total_mem, booted):
+    """{pid: row} with cumulative CPU ticks in `ticks` (no percentage yet)."""
+    rows = {}
+    me = os.getuid()
+    try:
+        entries = os.listdir(PROC)
+    except OSError:
+        return rows
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        base = os.path.join(PROC, entry)
+        comm, f = parse_stat(read(os.path.join(base, "stat")))
+        if comm is None or len(f) < 22:
+            continue
+        uid = None
+        for line in read(os.path.join(base, "status")).splitlines():
+            if line.startswith("Uid:"):
+                uid = int(line.split()[1])
+                break
+        if uid is None:
+            continue
+        raw = read(os.path.join(base, "cmdline"))
+        # One line: arguments may hold newlines and tabs (a script passed inline).
+        cmd = " ".join(raw.replace("\0", " ").split())[:MAX_CMD]
+        pid = int(entry)
+        rss = int(f[21]) * PAGE
+        start = int(f[19])
+        rows[pid] = {
+            "pid": pid, "ppid": int(f[1]), "name": comm, "cmd": cmd or "[" + comm + "]",
+            "kernel": not cmd, "user": username(uid), "mine": uid == me, "state": f[0],
+            "threads": int(f[17]), "nice": int(f[16]), "ticks": int(f[11]) + int(f[12]),
+            "rss": rss, "mem": round(rss * 100.0 / total_mem, 1) if total_mem else 0.0,
+            "start": start, "started": int(booted + start / TICK),
+            "session": comm in SESSION,
+        }
+    return rows
+
+
+# ------------------------------------------------------------------- GPU
+
+def drm_clients(pid):
+    """GPU engine time (ns) and memory (bytes) of one process, from the
+    kernel's per-client DRM fdinfo (i915, xe, amdgpu, nouveau, msm, …).
+    Only your own processes can be read; nothing here wakes a GPU."""
+    base = os.path.join(PROC, str(pid))
+    try:
+        fds = os.listdir(os.path.join(base, "fd"))
+    except OSError:
+        return None
+    seen, busy, mem, driver = set(), 0, 0, ""
+    for fd in fds:
+        try:
+            if not os.readlink(os.path.join(base, "fd", fd)).startswith("/dev/dri/"):
+                continue
+        except OSError:
+            continue
+        info = {}
+        for line in read(os.path.join(base, "fdinfo", fd)).splitlines():
+            key, _, value = line.partition(":")
+            info[key.strip()] = value.strip()
+        client = info.get("drm-client-id")
+        if not client or (info.get("drm-driver"), client) in seen:
+            continue
+        seen.add((info.get("drm-driver"), client))
+        driver = driver or info.get("drm-driver", "")
+        for key, value in info.items():
+            if key.startswith("drm-engine-") and value.endswith(" ns") and not key.startswith("drm-engine-capacity"):
+                busy += int(value.split()[0] or 0)
+            elif key.startswith("drm-total-") and value.endswith("KiB"):
+                mem += int(value.split()[0] or 0) * 1024
+    return {"ns": busy, "mem": mem, "driver": driver} if seen else None
+
+
+class NvmlProcesses:
+    """Per-process GPU memory and use on NVIDIA cards, only while a card is
+    already awake (asking a sleeping one would wake it)."""
+
+    class Info(ctypes.Structure):
+        _fields_ = [("pid", ctypes.c_uint), ("usedGpuMemory", ctypes.c_ulonglong),
+                    ("gpuInstanceId", ctypes.c_uint), ("computeInstanceId", ctypes.c_uint)]
+
+    class Sample(ctypes.Structure):
+        _fields_ = [("pid", ctypes.c_uint), ("timeStamp", ctypes.c_ulonglong), ("smUtil", ctypes.c_uint),
+                    ("memUtil", ctypes.c_uint), ("encUtil", ctypes.c_uint), ("decUtil", ctypes.c_uint)]
+
+    def __init__(self):
+        self.devices = []
+        for dev in sorted(glob.glob(os.path.join(ROOT, "sys/bus/pci/devices/*"))):
+            if read(os.path.join(dev, "vendor")).strip() == "0x10de" and read(os.path.join(dev, "class")).startswith("0x03"):
+                self.devices.append(dev)
+        self.lib = None
+        if self.devices:
+            try:
+                self.lib = ctypes.CDLL("libnvidia-ml.so.1")
+            except OSError:
+                self.lib = None
+        self.last = 0
+
+    def read(self):
+        out = {}
+        awake = [d for d in self.devices if read(os.path.join(d, "power/runtime_status"), "active").strip() != "suspended"]
+        if not self.lib or not awake:
+            return out
+        lib = self.lib
+        if lib.nvmlInit_v2() != 0:
+            return out
+        try:
+            for dev in awake:
+                handle = ctypes.c_void_p()
+                if lib.nvmlDeviceGetHandleByPciBusId_v2(os.path.basename(dev).encode(), ctypes.byref(handle)) != 0:
+                    continue
+                for name in ("nvmlDeviceGetComputeRunningProcesses_v3", "nvmlDeviceGetGraphicsRunningProcesses_v3"):
+                    fn = getattr(lib, name, None)
+                    if not fn:
+                        continue
+                    count = ctypes.c_uint(64)
+                    infos = (self.Info * 64)()
+                    if fn(handle, ctypes.byref(count), infos) != 0:
+                        continue
+                    for i in range(min(count.value, 64)):
+                        entry = out.setdefault(infos[i].pid, {"mem": 0, "util": None})
+                        if infos[i].usedGpuMemory < (1 << 62):
+                            entry["mem"] += infos[i].usedGpuMemory
+                count = ctypes.c_uint(0)
+                fn = getattr(lib, "nvmlDeviceGetProcessUtilization", None)
+                if fn and fn(handle, None, ctypes.byref(count), ctypes.c_ulonglong(self.last)) in (0, 7) and count.value:
+                    samples = (self.Sample * count.value)()
+                    if fn(handle, samples, ctypes.byref(count), ctypes.c_ulonglong(self.last)) == 0:
+                        for i in range(count.value):
+                            entry = out.setdefault(samples[i].pid, {"mem": 0, "util": None})
+                            entry["util"] = max(entry["util"] or 0, samples[i].smUtil)
+                            self.last = max(self.last, samples[i].timeStamp)
+        finally:
+            lib.nvmlShutdown()
+        return out
+
+
+def with_gpu(rows, before, elapsed, nvml):
+    """Each own process's GPU share since the last sample and its GPU memory."""
+    for pid, row in rows.items():
+        if not row["mine"]:
+            continue
+        drm = drm_clients(pid)
+        if not drm:
+            continue
+        row["_gpu_ns"] = drm["ns"]
+        old = before.get(pid)
+        if old and old.get("_gpu_ns") is not None and old["start"] == row["start"] and elapsed > 0:
+            row["gpu"] = round(max(0, drm["ns"] - old["_gpu_ns"]) / 1e9 / elapsed * 100, 1)
+        row["gpuMem"] = drm["mem"]
+        row["gpuDriver"] = drm["driver"]
+    for pid, entry in (nvml.read() if nvml else {}).items():
+        row = rows.get(pid)
+        if not row:
+            continue
+        if entry["util"] is not None:
+            row["gpu"] = max(row.get("gpu") or 0, entry["util"])
+        row["gpuMem"] = (row.get("gpuMem") or 0) + entry["mem"]
+        row["gpuDriver"] = "nvidia" if not row.get("gpuDriver") else row["gpuDriver"] + " + nvidia"
+    return rows
+
+
+def with_cpu(rows, before, elapsed):
+    for pid, row in rows.items():
+        old = before.get(pid)
+        if old and old["start"] == row["start"] and elapsed > 0:
+            row["cpu"] = round(max(0, row["ticks"] - old["ticks"]) / TICK / elapsed * 100, 1)
+        else:
+            row["cpu"] = 0.0
+    return rows
+
+
+def summary(rows, total_mem):
+    out = {"count": len(rows), "threads": 0, "running": 0, "cpu": 0.0, "rss": 0, "memTotal": total_mem,
+           "cores": os.cpu_count() or 1}
+    for row in rows.values():
+        out["threads"] += row["threads"]
+        out["running"] += 1 if row["state"] == "R" else 0
+        out["cpu"] += row.get("cpu", 0.0)
+        out["rss"] += row["rss"]
+    out["cpu"] = round(out["cpu"], 1)
+    return out
+
+
+def emit(rows, total_mem, now):
+    data = {"type": "procs", "ts": int(now * 1000), "summary": summary(rows, total_mem),
+            "procs": sorted(({k: v for k, v in r.items() if k not in ("ticks", "_gpu_ns")} for r in rows.values()),
+                            key=lambda r: (-r["cpu"], -r["rss"]))}
+    try:
+        sys.stdout.write(json.dumps(data, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # The reader has gone (the tab closed): leave quietly.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(0)
+
+
+def watch(interval):
+    username, total_mem, booted = users(), mem_total(), boot_time()
+    parent = os.getppid()
+    nvml = NvmlProcesses()
+    before, then = with_gpu(sample(username, total_mem, booted), {}, 0, None), time.monotonic()
+    while True:
+        time.sleep(interval)
+        if os.getppid() != parent:
+            return 0
+        rows, now = sample(username, total_mem, booted), time.monotonic()
+        rows = with_gpu(with_cpu(rows, before, now - then), before, now - then, nvml)
+        emit(rows, total_mem, time.time())
+        before, then = rows, now
+
+
+# ---------------------------------------------------------------- actions
+
+def identity(pid):
+    comm, f = parse_stat(read(os.path.join(PROC, str(pid), "stat")))
+    if comm is None or len(f) < 22 or f[0] in ("Z", "X"):
+        return None  # gone, or a zombie: it has ended, only its entry is left
+    uid = None
+    for line in read(os.path.join(PROC, str(pid), "status")).splitlines():
+        if line.startswith("Uid:"):
+            uid = int(line.split()[1])
+    return {"start": int(f[19]), "uid": uid, "name": comm}
+
+
+def ancestors():
+    out, pid = set(), os.getpid()
+    for _ in range(64):
+        out.add(pid)
+        comm, f = parse_stat(read(os.path.join(PROC, str(pid), "stat")))
+        if comm is None or len(f) < 2 or int(f[1]) <= 1:
+            break
+        pid = int(f[1])
+    return out
+
+
+def check(pid, start):
+    """The process if it may be acted on, else (None, reason)."""
+    if pid <= 1:
+        return None, "PID 1 and the kernel are never signalled"
+    found = identity(pid)
+    if not found or found["start"] != start:
+        return None, "that process has already ended"
+    if found["uid"] != os.getuid():
+        return None, "it belongs to another user"
+    if pid in ancestors():
+        return None, "that is the shell running this panel"
+    return found, None
+
+
+def signal_one(pid, start, name, wait=True):
+    """Signal one process; a result dict ({"ok": …}) rather than printed.
+    With `wait`, give it 1.5 s to end so the answer says whether it did."""
+    sig = SIGNALS.get(name.upper())
+    if sig is None:
+        return {"ok": False, "error": "unknown signal " + name}
+    found, why = check(pid, start)
+    if not found:
+        return {"ok": False, "error": why}
+    try:
+        if hasattr(os, "pidfd_open") and hasattr(signals, "pidfd_send_signal") and ROOT == "/":
+            fd = os.pidfd_open(pid)
+            try:
+                again = identity(pid)
+                if not again or again["start"] != start:
+                    return {"ok": False, "error": "that process has already ended"}
+                signals.pidfd_send_signal(fd, sig)
+            finally:
+                os.close(fd)
+        else:
+            os.kill(pid, sig)
+    except ProcessLookupError:
+        return {"ok": False, "error": "that process has already ended"}
+    except PermissionError:
+        return {"ok": False, "error": "not permitted"}
+    if wait and sig in (signals.SIGTERM, signals.SIGINT, signals.SIGHUP, signals.SIGKILL):
+        for _ in range(15):
+            again = identity(pid)
+            if not again or again["start"] != start:
+                return {"ok": True, "ended": True, "name": found["name"]}
+            time.sleep(0.1)
+        return {"ok": True, "ended": False, "name": found["name"]}
+    return {"ok": True, "name": found["name"]}
+
+
+def send(pid, start, name):
+    result = signal_one(pid, start, name)
+    print(json.dumps(result))
+    return 0 if result["ok"] else 3
+
+
+def descendants(pid):
+    """Every process under `pid`, deepest first, as (pid, start time)."""
+    children = {}
+    for entry in os.listdir(PROC):
+        if not entry.isdigit():
+            continue
+        comm, f = parse_stat(read(os.path.join(PROC, entry, "stat")))
+        if comm is not None and len(f) > 19:
+            children.setdefault(int(f[1]), []).append((int(entry), int(f[19])))
+    out = []
+
+    def walk(p, depth):
+        for child in children.get(p, []):
+            if depth < 64:
+                walk(child[0], depth + 1)
+                out.append(child)
+    walk(pid, 0)
+    return out
+
+
+def send_tree(pid, start, name):
+    if SIGNALS.get(name.upper()) is None:
+        return fail("unknown signal " + name)
+    found, why = check(pid, start)
+    if not found:
+        return fail(why)
+    done, skipped = 0, 0
+    for child, child_start in descendants(pid):
+        if signal_one(child, child_start, name, wait=False)["ok"]:
+            done += 1
+        else:
+            skipped += 1
+    result = signal_one(pid, start, name)
+    result.update({"children": done, "skipped": skipped})
+    print(json.dumps(result))
+    return 0 if result["ok"] else 3
+
+
+def renice(pid, start, value):
+    found, why = check(pid, start)
+    if not found:
+        return fail(why)
+    if not -20 <= value <= 19:
+        return fail("nice is -20 to 19")
+    try:
+        current = os.getpriority(os.PRIO_PROCESS, pid)
+        if value < current and os.geteuid() != 0:
+            return fail("lowering the nice value needs root; raising it (lower priority) is allowed")
+        os.setpriority(os.PRIO_PROCESS, pid, value)
+    except ProcessLookupError:
+        return fail("that process has already ended")
+    except PermissionError:
+        return fail("not permitted")
+    return ok({"nice": value, "name": found["name"]})
+
+
+def detail(pid):
+    base = os.path.join(PROC, str(pid))
+    out = {"pid": pid}
+    for key, rel in (("cwd", "cwd"), ("exe", "exe")):
+        try:
+            out[key] = os.readlink(os.path.join(base, rel))
+        except OSError:
+            out[key] = ""
+    try:
+        out["fds"] = len(os.listdir(os.path.join(base, "fd")))
+    except OSError:
+        out["fds"] = None
+    io = {}
+    for line in read(os.path.join(base, "io")).splitlines():
+        key, _, value = line.partition(":")
+        if key in ("read_bytes", "write_bytes"):
+            io[key] = int(value.strip() or 0)
+    out["io"] = io or None
+    status = {}
+    for line in read(os.path.join(base, "status")).splitlines():
+        key, _, value = line.partition(":")
+        if key in ("State", "VmPeak", "VmSwap", "voluntary_ctxt_switches", "nonvoluntary_ctxt_switches"):
+            status[key] = value.strip()
+    out["status"] = status
+    out["cmd"] = read(os.path.join(base, "cmdline")).replace("\0", " ").strip()[:MAX_CMD * 4]
+    return ok(out)
+
+
+def ok(data):
+    print(json.dumps(dict({"ok": True}, **data)))
+    return 0
+
+
+def fail(reason):
+    print(json.dumps({"ok": False, "error": reason}))
+    return 3
+
+
+def number(text):
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def main(argv):
+    command = argv[1] if len(argv) > 1 else ""
+    if command == "watch":
+        seconds = float(argv[2]) if len(argv) > 2 else 2.0
+        return watch(max(0.5, min(10.0, seconds)))
+    if command == "once":
+        username, total_mem = users(), mem_total()
+        rows = with_cpu(sample(username, total_mem, boot_time()), {}, 0)
+        emit(rows, total_mem, time.time())
+        return 0
+    if command == "detail" and len(argv) == 3 and number(argv[2]):
+        return detail(number(argv[2]))
+    if command == "signal" and len(argv) == 5 and number(argv[2]) is not None and number(argv[3]) is not None:
+        return send(number(argv[2]), number(argv[3]), argv[4])
+    if command == "signal-tree" and len(argv) == 5 and number(argv[2]) is not None and number(argv[3]) is not None:
+        return send_tree(number(argv[2]), number(argv[3]), argv[4])
+    if command == "renice" and len(argv) == 5 and None not in (number(argv[2]), number(argv[3]), number(argv[4])):
+        return renice(number(argv[2]), number(argv[3]), number(argv[4]))
+    print(__doc__.split("\n\n")[1], file=sys.stderr)
+    return 64
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

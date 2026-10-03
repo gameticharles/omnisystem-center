@@ -1,0 +1,1341 @@
+#!/usr/bin/env python3
+"""The energy meter for OmniSystem Center: what this machine draws and what
+it costs to run, per day, week, month and year.
+
+    omnisystem-center-energy run [--ports SECONDS]
+                                                 sample until the shell closes; with --ports, also
+                                                 scan the listening ports (one process, not two)
+    omnisystem-center-energy now [--json]        the latest reading, today, this month
+    omnisystem-center-energy report PERIOD [-n N] [--json]
+                                                 day | week | month | year buckets
+    omnisystem-center-energy chart DAYS [--json] power over the last DAYS days
+    omnisystem-center-energy panel PERIOD [-n N] everything the Energy tab shows
+    omnisystem-center-energy status [--json]     sensors, database, settings
+    omnisystem-center-energy config [KEY=VALUE ...] [--json]
+    omnisystem-center-energy currencies [--json]
+    omnisystem-center-energy export [FILE]        every recorded day as CSV (to FILE, or Downloads)
+
+One rule: an estimate is never shown as a measurement.
+
+- On battery the battery reports the power leaving it, which is the whole
+  machine: measured.
+- On AC the CPU package comes from its RAPL energy counter and the GPU from
+  amdgpu or NVML: measured. The rest of the machine (memory, disk, screen,
+  fans) has no sensor, so it is `baseline_w`, an estimate you can calibrate.
+- A charger or power supply loses some energy on the way: `psu_efficiency`,
+  also an estimate.
+
+The database keeps only measured microjoules and how long they were measured
+over. The baseline, the efficiency and the price are applied when a number
+is shown, so changing any of them corrects the whole history at once.
+
+The sampler is started by the shell and stops with it. Time the shell was
+not running, the machine slept, or (on AC) the CPU counter could not be read
+counts as untracked, never as zero use, and every bucket says how much of
+it was tracked.
+
+The NVIDIA power reading is taken only while the GPU is awake: on a hybrid
+laptop asking a sleeping GPU for its power would wake it and cost more
+battery than the reading is worth. A sleeping GPU is counted as 0 W.
+
+OMNISYSTEM_SYSFS_ROOT (default /) points it at a fake tree for the tests.
+"""
+import calendar
+import ctypes
+import datetime
+import fcntl
+import glob
+import json
+import os
+import re
+import sqlite3
+import sys
+import tempfile
+import time
+
+ROOT = os.environ.get("OMNISYSTEM_SYSFS_ROOT", "/")
+STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "omnisystem-center")
+CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "omnisystem-center")
+DB_PATH = os.path.join(STATE_DIR, "energy.db")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "energy.json")
+LOCK_PATH = os.path.join(STATE_DIR, "energy.lock")
+MAX_CONFIG_BYTES = 64 * 1024
+UJ_PER_KWH = 3.6e12
+
+
+def path(*parts):
+    return os.path.join(ROOT, *[p.lstrip("/") for p in parts])
+
+
+def read(file, default=""):
+    try:
+        with open(file) as handle:
+            return handle.read().strip()
+    except OSError:
+        return default
+
+
+def number(value, default=None):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+# ---------------------------------------------------------------- settings
+
+CURRENCIES = {
+    # code: (symbol, decimals)
+    "USD": ("$", 2), "EUR": ("€", 2), "GBP": ("£", 2), "GHS": ("GH₵", 2), "NGN": ("₦", 2),
+    "KES": ("KSh", 2), "ZAR": ("R", 2), "EGP": ("E£", 2), "XOF": ("CFA", 0), "XAF": ("FCFA", 0),
+    "MAD": ("MAD", 2), "UGX": ("USh", 0), "TZS": ("TSh", 0), "RWF": ("RF", 0), "ETB": ("Br", 2),
+    "JPY": ("¥", 0), "CNY": ("CN¥", 2), "KRW": ("₩", 0), "INR": ("₹", 2), "IDR": ("Rp", 0),
+    "VND": ("₫", 0), "PHP": ("₱", 2), "THB": ("฿", 2), "MYR": ("RM", 2), "SGD": ("S$", 2),
+    "PKR": ("Rs", 2), "BDT": ("৳", 2), "AUD": ("A$", 2), "NZD": ("NZ$", 2), "CAD": ("CA$", 2),
+    "MXN": ("MX$", 2), "BRL": ("R$", 2), "ARS": ("AR$", 2), "CLP": ("CLP$", 0), "COP": ("COL$", 0),
+    "CHF": ("CHF", 2), "SEK": ("kr", 2), "NOK": ("kr", 2), "DKK": ("kr", 2), "ISK": ("kr", 0),
+    "PLN": ("zł", 2), "CZK": ("Kč", 2), "HUF": ("Ft", 0), "RON": ("lei", 2), "BGN": ("лв", 2),
+    "TRY": ("₺", 2), "UAH": ("₴", 2), "RUB": ("₽", 2), "ILS": ("₪", 2), "AED": ("AED", 2),
+    "SAR": ("SAR", 2), "QAR": ("QAR", 2), "HKD": ("HK$", 2), "TWD": ("NT$", 0),
+}
+
+
+def chassis_is_laptop():
+    kind = read(path("sys/class/dmi/id/chassis_type"))
+    # SMBIOS: 8 portable, 9 laptop, 10 notebook, 14 sub-notebook, 30 tablet,
+    # 31 convertible, 32 detachable.
+    return kind in ("8", "9", "10", "14", "30", "31", "32") or bool(battery_dir())
+
+
+def defaults():
+    return {
+        "tariff": 0.0,
+        "currency": "USD",
+        "currency_symbol": "",
+        "cost_decimals": "auto",
+        "baseline_w": 12.0 if chassis_is_laptop() else 32.0,
+        "psu_efficiency": 0.88 if chassis_is_laptop() else 0.89,
+        "interval_s": 10,
+        "gpu_interval_s": 2.0,
+        "raw_retention_days": 30,
+        "sanity_max_cpu_w": 1000,
+        "gpu_source": "auto",
+        "monthly_budget": 0.0,
+    }
+
+
+# Changing these reprices the whole history; the rest only change sampling.
+RETROACTIVE = ("tariff", "currency", "currency_symbol", "cost_decimals", "baseline_w", "psu_efficiency", "monthly_budget")
+
+
+def validate(key, raw):
+    """The value for `key` parsed from `raw` text, or ValueError with the reason."""
+    text = str(raw).strip()
+
+    def ranged(lo, hi, whole=False):
+        value = number(text)
+        if value is None or value != value:
+            raise ValueError(f"{key} must be a number")
+        if not lo <= value <= hi:
+            raise ValueError(f"{key} must be between {lo} and {hi}")
+        if whole:
+            if value != int(value):
+                raise ValueError(f"{key} must be a whole number")
+            return int(value)
+        return float(value)
+
+    if key == "tariff":
+        return ranged(0, 100000)
+    if key == "currency":
+        if not re.fullmatch(r"[A-Za-z]{2,5}", text):
+            raise ValueError("currency must be a 2 to 5 letter code")
+        return text.upper()
+    if key == "currency_symbol":
+        if len(text) > 6 or any(ch in text for ch in "\n\r\t"):
+            raise ValueError("currency_symbol is at most 6 characters")
+        return text
+    if key == "cost_decimals":
+        if text in ("", "auto"):
+            return "auto"
+        return ranged(0, 4, whole=True)
+    if key == "baseline_w":
+        return ranged(0, 500)
+    if key == "psu_efficiency":
+        return ranged(0.5, 1.0)
+    if key == "interval_s":
+        return ranged(2, 120, whole=True)
+    if key == "gpu_interval_s":
+        return ranged(0.5, 10)
+    if key == "raw_retention_days":
+        return ranged(1, 365, whole=True)
+    if key == "sanity_max_cpu_w":
+        return ranged(50, 5000, whole=True)
+    if key == "monthly_budget":
+        return ranged(0, 10000000)
+    if key == "gpu_source":
+        if text not in ("auto", "off", "nvidia", "amdgpu", "intel"):
+            raise ValueError("gpu_source is auto, off, nvidia, amdgpu or intel")
+        return text
+    raise ValueError(f"unknown setting {key}")
+
+
+def safe_file(file):
+    """Refuse a planted link or something that is not ours."""
+    try:
+        info = os.lstat(file)
+    except FileNotFoundError:
+        return None
+    if os.path.islink(file) or not os.path.isfile(file):
+        return "not a regular file"
+    if info.st_uid != os.getuid():
+        return "not owned by you"
+    if info.st_nlink != 1:
+        return f"has {info.st_nlink} hard links, not 1"
+    if info.st_size > MAX_CONFIG_BYTES:
+        return f"is larger than {MAX_CONFIG_BYTES} bytes"
+    return None
+
+
+def load_config():
+    config = defaults()
+    problem = safe_file(CONFIG_PATH)
+    if problem:
+        raise RefusedPath(CONFIG_PATH, problem)
+    try:
+        with open(CONFIG_PATH, "rb") as handle:
+            saved = json.loads(handle.read(MAX_CONFIG_BYTES).decode("utf-8"))
+    except (OSError, ValueError):
+        saved = {}
+    if isinstance(saved, dict):
+        for key, value in saved.items():
+            if key in config:
+                try:
+                    config[key] = validate(key, value)
+                except ValueError:
+                    pass
+    return config
+
+
+def save_config(config):
+    os.makedirs(CONFIG_DIR, mode=0o700, exist_ok=True)
+    problem = safe_file(CONFIG_PATH)
+    if problem:
+        raise RefusedPath(CONFIG_PATH, problem)
+    base = defaults()
+    changed = {k: v for k, v in config.items() if k in base and v != base[k]}
+    fd, tmp = tempfile.mkstemp(prefix=".energy.", dir=CONFIG_DIR)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            json.dump(changed, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, CONFIG_PATH)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+class RefusedPath(Exception):
+    def __init__(self, file, reason):
+        super().__init__(f"refusing to use {file}: {reason}")
+
+
+def money(config):
+    code = config["currency"]
+    symbol, decimals = CURRENCIES.get(code, (code + " ", 2))
+    if config.get("currency_symbol"):
+        symbol = config["currency_symbol"]
+    if config.get("cost_decimals") != "auto":
+        decimals = int(config["cost_decimals"])
+    return symbol, decimals
+
+
+def format_cost(value, config):
+    if value is None or not config.get("tariff"):
+        return ""
+    symbol, decimals = money(config)
+    text = f"{value:,.{decimals}f}"
+    spacer = " " if symbol[-1:].isalpha() and len(symbol) > 1 else ""
+    return f"{symbol}{spacer}{text}"
+
+
+# ----------------------------------------------------------------- sensors
+
+def battery_dir():
+    for candidate in sorted(glob.glob(path("sys/class/power_supply/*"))):
+        if read(os.path.join(candidate, "type")) == "Battery" and read(os.path.join(candidate, "scope")) != "Device":
+            return candidate
+    return ""
+
+
+def on_ac():
+    """True on mains power. A machine with no battery is always on mains."""
+    supplies = sorted(glob.glob(path("sys/class/power_supply/*")))
+    mains = [s for s in supplies if read(os.path.join(s, "type")) in ("Mains", "USB", "USB_C", "USB_PD")
+             and read(os.path.join(s, "scope")) != "Device"]
+    if any(read(os.path.join(s, "online")) == "1" for s in mains):
+        return True
+    bat = battery_dir()
+    if not bat:
+        return True
+    return read(os.path.join(bat, "status")) != "Discharging" and not mains
+
+
+def battery_watts():
+    """Power leaving the battery in W while it discharges, else None."""
+    bat = battery_dir()
+    if not bat or read(os.path.join(bat, "status")) != "Discharging":
+        return None
+    power = number(read(os.path.join(bat, "power_now")))
+    if power is None:
+        current = number(read(os.path.join(bat, "current_now")))
+        voltage = number(read(os.path.join(bat, "voltage_now")))
+        if current is None or voltage is None:
+            return None
+        power = abs(current) * voltage / 1e6
+    watts = abs(power) / 1e6
+    return watts if 0 < watts < 1000 else None
+
+
+def rapl_zones():
+    """Package zones: readable ones are used. `core`/`uncore` are parts of a
+    package and `intel-rapl-mmio` repeats package 0, so none of those are."""
+    used, unreadable, unused = [], [], []
+    for zone in sorted(glob.glob(path("sys/class/powercap/intel-rapl:*"))):
+        name = read(os.path.join(zone, "name"))
+        if not re.search(r"intel-rapl:\d+$", zone):
+            continue
+        if name.startswith("package"):
+            energy = os.path.join(zone, "energy_uj")
+            (used if read(energy, None) not in (None, "") else unreadable).append(zone)
+        elif name:
+            unused.append(name)
+    return used, unreadable, unused
+
+
+def read_rapl(zones):
+    out = {}
+    for zone in zones:
+        value = number(read(os.path.join(zone, "energy_uj"), None))
+        top = number(read(os.path.join(zone, "max_energy_range_uj"), None))
+        if value is not None:
+            out[zone] = (int(value), int(top) if top else 2 ** 32)
+    return out
+
+
+def rapl_delta(before, after, dt, sanity_w):
+    """µJ used by the CPU package between two readings, or None after a reset."""
+    if not before or not after or set(before) != set(after):
+        return None
+    total = 0
+    for zone, (now, top) in after.items():
+        then = before[zone][0]
+        delta = (now - then) % top
+        if dt > 0 and delta / 1e6 / dt > sanity_w:
+            return None
+        total += delta
+    return total
+
+
+def cpu_has_graphics():
+    model = ""
+    for line in read(path("proc/cpuinfo")).splitlines():
+        if line.startswith("model name"):
+            model = line.split(":", 1)[1]
+            break
+    return "radeon" in model.lower()
+
+
+def pci_awake(device):
+    return read(os.path.join(device, "power/runtime_status"), "active") != "suspended"
+
+
+def awake_now(d):
+    return pci_awake(d["dev"])
+
+
+GPU_VENDORS = {"0x10de": "NVIDIA", "0x1002": "AMD", "0x8086": "Intel"}
+
+
+def gpu_devices():
+    """Every display controller, from cached sysfs attributes only (reading a
+    sleeping GPU's config space would wake it)."""
+    out = []
+    graphics_in_cpu = cpu_has_graphics()
+    for dev in sorted(glob.glob(path("sys/bus/pci/devices/*"))):
+        if not read(os.path.join(dev, "class")).startswith("0x03"):
+            continue
+        vendor = GPU_VENDORS.get(read(os.path.join(dev, "vendor")))
+        if not vendor:
+            continue
+        bdf = os.path.basename(dev)
+        hwmons = sorted(glob.glob(os.path.join(dev, "hwmon/hwmon*")))
+        if vendor == "Intel":
+            integrated = bdf.split(":")[1:2] == ["00"]   # Arc cards sit on their own bus
+        elif vendor == "AMD":
+            vram = number(read(os.path.join(dev, "mem_info_vram_total")), 0)
+            integrated = graphics_in_cpu and vram <= 2 * 1024 ** 3
+        else:
+            integrated = False
+        out.append({"id": bdf, "dev": dev, "vendor": vendor, "integrated": integrated,
+                    "hwmon": hwmons[0] if hwmons else "", "idle": idle_counter(dev)})
+    return out
+
+
+def idle_counter(dev):
+    """Intel GPUs count the milliseconds they spent idle (RC6); the share of
+    time not idle is how busy they were. World-readable, never wakes the GPU."""
+    for card in glob.glob(os.path.join(dev, "drm/card*")):
+        for rel in ("gt/gt0/rc6_residency_ms", "power/rc6_residency_ms",
+                    "device/tile0/gt0/gtidle/idle_residency_ms"):
+            file = os.path.join(card, rel)
+            if os.path.exists(file):
+                return file
+    for file in glob.glob(os.path.join(dev, "tile0/gt0/gtidle/idle_residency_ms")):
+        return file
+    return ""
+
+
+def cpu_package_temp():
+    """The CPU package temperature: Intel integrated graphics sit on that die
+    and have no sensor of their own."""
+    for hwmon in sorted(glob.glob(path("sys/class/hwmon/hwmon*"))):
+        if read(os.path.join(hwmon, "name")) not in ("coretemp", "k10temp", "zenpower"):
+            continue
+        for label in sorted(glob.glob(os.path.join(hwmon, "temp*_label"))):
+            if read(label).startswith(("Package", "Tctl", "Tdie")):
+                value = number(read(label.replace("_label", "_input"), None))
+                if value:
+                    return round(value / 1000, 1)
+        value = number(read(os.path.join(hwmon, "temp1_input"), None))
+        if value:
+            return round(value / 1000, 1)
+    return None
+
+
+def hwmon_temp(hwmon):
+    """The first temperature an amdgpu or Intel card's hwmon reports, in °C."""
+    for name in ("temp1_input", "temp2_input", "temp3_input"):
+        value = number(read(os.path.join(hwmon, name), None))
+        if value is not None and value > 0:
+            return round(value / 1000, 1)
+    return None
+
+
+class NvmlUtil(ctypes.Structure):
+    _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
+
+
+class Nvml:
+    """NVML through ctypes. Opened on the first reading while a GPU is awake
+    and kept open (opening it costs ~13 ms of CPU, every 2 s that was most of
+    the sampler's cost); closed as soon as no NVIDIA GPU is awake, so nothing
+    of ours is held while it sleeps. An open handle does not keep a GPU awake
+    (the compositor holds one all the time), and a sleeping GPU is never asked."""
+
+    def __init__(self):
+        self.lib = None
+        self.ready = False
+        self.failed = None
+        try:
+            self.lib = ctypes.CDLL("libnvidia-ml.so.1")
+        except OSError:
+            self.failed = "the NVIDIA driver library is not installed"
+
+    def read(self, bus_ids):
+        """{bus id: (watts, busy %, °C)} for the given cards, None where unknown."""
+        out = {}
+        if not self.lib or not bus_ids:
+            return out
+        lib = self.lib
+        if not self.ready:
+            if lib.nvmlInit_v2() != 0:
+                self.failed = "the NVIDIA driver is not answering"
+                return out
+            self.ready = True
+        try:
+            for bus in bus_ids:
+                handle = ctypes.c_void_p()
+                if lib.nvmlDeviceGetHandleByPciBusId_v2(bus.encode(), ctypes.byref(handle)) != 0:
+                    out[bus] = (None, None, None)
+                    continue
+                milliwatts = ctypes.c_uint(0)
+                ok = lib.nvmlDeviceGetPowerUsage(handle, ctypes.byref(milliwatts)) == 0
+                watts = milliwatts.value / 1000.0 if ok else None
+                util = NvmlUtil()
+                busy = util.gpu if lib.nvmlDeviceGetUtilizationRates(handle, ctypes.byref(util)) == 0 else None
+                celsius = ctypes.c_uint(0)
+                temp = celsius.value if lib.nvmlDeviceGetTemperature(handle, 0, ctypes.byref(celsius)) == 0 else None
+                out[bus] = (watts, busy, temp)
+            self.failed = None if any(v[0] is not None for v in out.values()) else "the GPU does not report its power"
+            return out
+        except OSError:
+            self.close()
+            return out
+
+    def close(self):
+        if self.lib and self.ready:
+            self.lib.nvmlShutdown()
+        self.ready = False
+
+
+class Gpu:
+    """Every GPU in the machine. Discrete cards are measured and added to the
+    total; integrated graphics draw from the CPU package, which RAPL already
+    measures, so they are shown but never added a second time.
+
+    `choice` is auto (all), off, or one vendor (nvidia, amdgpu, intel) to read."""
+
+    def __init__(self, choice):
+        self.choice = choice
+        self.devices = [] if choice == "off" else gpu_devices()
+        self.nvml = None
+        self.reason = ""
+        self.prev = {}         # counter readings for Intel cards and the uncore zone
+        self.cache = {}        # the last NVIDIA reading, reused on battery
+        self.cache_at = 0.0
+        wanted = {"nvidia": "NVIDIA", "amdgpu": "AMD", "intel": "Intel"}.get(choice)
+        for d in self.devices:
+            d["measured"] = not d["integrated"] and (wanted is None or d["vendor"] == wanted)
+        if any(d["vendor"] == "NVIDIA" and d["measured"] for d in self.devices):
+            self.nvml = Nvml()
+            if not self.nvml.lib:
+                self.reason = self.nvml.failed
+        discrete = [d for d in self.devices if d["measured"]]
+        self.kind = ",".join(sorted({d["vendor"].lower() for d in discrete})) or None
+        if choice == "off":
+            self.reason = "turned off in the settings"
+        elif not self.kind and not self.reason:
+            self.reason = ("integrated graphics only: counted inside the CPU package" if self.devices
+                           else "no GPU found")
+        self.uncore = ""
+        for zone in glob.glob(path("sys/class/powercap/intel-rapl:*:*")):
+            if read(os.path.join(zone, "name")) == "uncore":
+                self.uncore = zone
+
+    def _idle_busy(self, d, now):
+        idle = number(read(d["idle"], None))
+        if idle is None:
+            return None
+        key = "idle:" + d["id"]
+        before = self.prev.get(key)
+        self.prev[key] = (idle, now)
+        if not before or now <= before[1]:
+            return None
+        share = (idle - before[0]) / 1000.0 / (now - before[1])
+        return int(round(max(0.0, min(1.0, 1.0 - share)) * 100))
+
+    def _counter_watts(self, key, file, now):
+        value = number(read(file, None))
+        if value is None:
+            return None
+        top = number(read(os.path.join(os.path.dirname(file), "max_energy_range_uj"), None)) or 2 ** 64
+        before = self.prev.get(key)
+        self.prev[key] = (value, now)
+        if not before or now <= before[1]:
+            return None
+        return ((value - before[0]) % top) / 1e6 / (now - before[1])
+
+    def read(self, on_battery=False, now=None):
+        """(watts, state, devices): watts sums the measured discrete cards
+        (None when one that is awake could not be read, or there is none)."""
+        now = now if now is not None else time.monotonic()
+        report, total, ok = [], 0.0, True
+        nvidia_awake = [d["id"] for d in self.devices if d["vendor"] == "NVIDIA" and d["measured"] and pci_awake(d["dev"])]
+        nv = {}
+        if not nvidia_awake and self.nvml:
+            self.nvml.close()
+        if nvidia_awake and self.nvml and self.nvml.lib:
+            # On battery the NVIDIA reading is refreshed at most every 10 s:
+            # each one opens the driver, and the battery figure is the total anyway.
+            if on_battery and self.cache and now - self.cache_at < 10 and set(self.cache) == set(nvidia_awake):
+                nv = self.cache
+            else:
+                nv = self.nvml.read(nvidia_awake)
+                self.cache, self.cache_at = nv, now
+        for d in self.devices:
+            entry = {"id": d["id"], "vendor": d["vendor"], "integrated": d["integrated"], "watts": None, "busy": None,
+                     "temp": None}
+            if d["idle"] and (d["integrated"] or awake_now(d)):
+                entry["busy"] = self._idle_busy(d, now)
+            awake = pci_awake(d["dev"])
+            if d["integrated"]:
+                entry["state"] = "in-package"
+                if d["vendor"] == "AMD" and d["hwmon"]:
+                    entry["temp"] = hwmon_temp(d["hwmon"])
+                if entry["temp"] is None:
+                    entry["temp"] = cpu_package_temp()
+                    entry["tempShared"] = entry["temp"] is not None
+                if d["vendor"] == "Intel" and self.uncore:
+                    entry["watts"] = self._counter_watts("uncore", os.path.join(self.uncore, "energy_uj"), now)
+                elif d["vendor"] == "AMD" and d["hwmon"]:
+                    value = number(read(os.path.join(d["hwmon"], "power1_average"), None))
+                    entry["watts"] = value / 1e6 if value is not None else None
+                if d["vendor"] == "AMD":
+                    busy = number(read(os.path.join(d["dev"], "gpu_busy_percent"), None))
+                    entry["busy"] = int(busy) if busy is not None else entry["busy"]
+            elif not awake:
+                entry["state"] = "asleep"
+                entry["watts"] = 0.0
+            else:
+                entry["state"] = "awake"
+                if d["vendor"] == "NVIDIA":
+                    entry["watts"], entry["busy"], entry["temp"] = nv.get(d["id"], (None, None, None))
+                elif d["vendor"] == "AMD" and d["hwmon"]:
+                    power = os.path.join(d["hwmon"], "power1_average")
+                    if not os.path.exists(power):
+                        power = os.path.join(d["hwmon"], "power1_input")
+                    value = number(read(power, None))
+                    entry["watts"] = value / 1e6 if value is not None else None
+                    busy = number(read(os.path.join(d["dev"], "gpu_busy_percent"), None))
+                    entry["busy"] = int(busy) if busy is not None else None
+                elif d["vendor"] == "Intel" and d["hwmon"]:
+                    entry["watts"] = self._counter_watts(d["id"], os.path.join(d["hwmon"], "energy1_input"), now)
+                if d["vendor"] in ("AMD", "Intel") and d["hwmon"]:
+                    entry["temp"] = hwmon_temp(d["hwmon"])
+            if entry["watts"] is not None:
+                entry["watts"] = round(entry["watts"], 1)
+            if d.get("measured"):
+                if entry["watts"] is None:
+                    ok = False
+                else:
+                    total += entry["watts"]
+            report.append(entry)
+        measured = [e for e in report if not e["integrated"] and self.kind]
+        state = "none" if not self.kind else ("awake" if any(e["state"] == "awake" for e in measured) else "asleep")
+        return (total if ok and self.kind else None), state, report
+
+
+# ---------------------------------------------------------------- database
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS samples (
+  ts INTEGER NOT NULL,          -- end of the interval, ms since the epoch
+  dt REAL NOT NULL,             -- seconds measured over
+  src TEXT NOT NULL,            -- 'ac' or 'battery'
+  cpu_uj INTEGER,               -- CPU package, NULL when not readable
+  gpu_uj INTEGER,               -- GPU, NULL when there is no GPU source
+  batt_uj INTEGER               -- leaving the battery (battery rows only)
+);
+CREATE INDEX IF NOT EXISTS samples_ts ON samples(ts);
+CREATE TABLE IF NOT EXISTS daily (
+  day TEXT PRIMARY KEY,         -- local date, YYYY-MM-DD
+  ac_cpu_uj INTEGER NOT NULL DEFAULT 0,
+  ac_gpu_uj INTEGER NOT NULL DEFAULT 0,
+  ac_s REAL NOT NULL DEFAULT 0,
+  batt_uj INTEGER NOT NULL DEFAULT 0,
+  batt_s REAL NOT NULL DEFAULT 0,
+  max_ac_w REAL NOT NULL DEFAULT 0,     -- largest measured AC interval average (CPU + GPU)
+  max_batt_w REAL NOT NULL DEFAULT 0    -- largest battery interval average
+);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+"""
+
+
+def connect(create=True):
+    if not create and not os.path.exists(DB_PATH):
+        return None
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    for file in (DB_PATH, DB_PATH + "-wal", DB_PATH + "-shm"):
+        if os.path.lexists(file) and (os.path.islink(file) or os.lstat(file).st_uid != os.getuid()):
+            raise RefusedPath(file, "a link or not owned by you")
+    db = sqlite3.connect(DB_PATH, timeout=5)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA busy_timeout=5000")
+    db.executescript(SCHEMA)
+    try:
+        os.chmod(DB_PATH, 0o600)
+    except OSError:
+        pass
+    return db
+
+
+def local_day(ms):
+    return time.strftime("%Y-%m-%d", time.localtime(ms / 1000))
+
+
+def record(db, row):
+    """Store one interval: the raw row and the day's running totals."""
+    ts, dt, src, cpu, gpu, batt = row["ts"], row["dt"], row["src"], row.get("cpu_uj"), row.get("gpu_uj"), row.get("batt_uj")
+    db.execute("INSERT INTO samples (ts, dt, src, cpu_uj, gpu_uj, batt_uj) VALUES (?, ?, ?, ?, ?, ?)",
+               (ts, dt, src, cpu, gpu, batt))
+    day = local_day(ts)
+    db.execute("INSERT OR IGNORE INTO daily (day) VALUES (?)", (day,))
+    if src == "battery":
+        watts = (batt or 0) / 1e6 / dt if dt > 0 else 0
+        db.execute("UPDATE daily SET batt_uj = batt_uj + ?, batt_s = batt_s + ?, max_batt_w = MAX(max_batt_w, ?) WHERE day = ?",
+                   (batt or 0, dt, watts, day))
+    else:
+        watts = ((cpu or 0) + (gpu or 0)) / 1e6 / dt if dt > 0 else 0
+        db.execute("UPDATE daily SET ac_cpu_uj = ac_cpu_uj + ?, ac_gpu_uj = ac_gpu_uj + ?, ac_s = ac_s + ?, "
+                   "max_ac_w = MAX(max_ac_w, ?) WHERE day = ?", (cpu or 0, gpu or 0, dt, watts, day))
+
+
+def bump(db, key, by=1):
+    db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + ?",
+               (key, str(by), by))
+
+
+def meta(db, key, default=None):
+    row = db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def prune(db, retention_days, now_ms):
+    db.execute("DELETE FROM samples WHERE ts < ?", (now_ms - retention_days * 86400000,))
+
+
+# --------------------------------------------------------------- the maths
+
+def totals(parts, config):
+    """Socket figures for summed parts: ac_cpu_uj, ac_gpu_uj, ac_s, batt_uj,
+    batt_s, max_ac_w, max_batt_w."""
+    base, eff = config["baseline_w"], config["psu_efficiency"]
+    measured = parts["batt_uj"] + parts["ac_cpu_uj"] + parts["ac_gpu_uj"]
+    estimated = base * parts["ac_s"] * 1e6
+    dc = measured + estimated
+    socket = dc / eff
+    tracked = parts["ac_s"] + parts["batt_s"]
+    kwh = socket / UJ_PER_KWH
+    peak = 0.0
+    if parts["ac_s"] > 0:
+        peak = max(peak, (parts["max_ac_w"] + base) / eff)
+    if parts["batt_s"] > 0:
+        peak = max(peak, parts["max_batt_w"] / eff)
+    return {
+        "kwh": round(kwh, 4),
+        "cost": round(kwh * config["tariff"], 6) if config["tariff"] else None,
+        "tracked_s": round(tracked, 1),
+        "avg_w": round(socket / 1e6 / tracked, 1) if tracked > 0 else None,
+        "max_w": round(peak, 1) if tracked > 0 else None,
+        "measured_share": round(measured / dc, 3) if dc > 0 else None,
+        "battery_share": round(parts["batt_s"] / tracked, 3) if tracked > 0 else None,
+        "cpu_kwh": round(parts["ac_cpu_uj"] / eff / UJ_PER_KWH, 4),
+        "gpu_kwh": round(parts["ac_gpu_uj"] / eff / UJ_PER_KWH, 4),
+        "rest_kwh": round(estimated / eff / UJ_PER_KWH, 4),
+        "battery_kwh": round(parts["batt_uj"] / eff / UJ_PER_KWH, 4),
+    }
+
+
+def empty_parts():
+    return {"ac_cpu_uj": 0, "ac_gpu_uj": 0, "ac_s": 0.0, "batt_uj": 0, "batt_s": 0.0, "max_ac_w": 0.0, "max_batt_w": 0.0}
+
+
+def add_parts(into, row):
+    for key in ("ac_cpu_uj", "ac_gpu_uj", "ac_s", "batt_uj", "batt_s"):
+        into[key] += row[key] or 0
+    into["max_ac_w"] = max(into["max_ac_w"], row["max_ac_w"] or 0)
+    into["max_batt_w"] = max(into["max_batt_w"], row["max_batt_w"] or 0)
+
+
+def daily_rows(db, first_day=None, last_day=None):
+    sql = "SELECT day, ac_cpu_uj, ac_gpu_uj, ac_s, batt_uj, batt_s, max_ac_w, max_batt_w FROM daily"
+    args, where = [], []
+    if first_day:
+        where.append("day >= ?")
+        args.append(first_day)
+    if last_day:
+        where.append("day <= ?")
+        args.append(last_day)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    keys = ("day", "ac_cpu_uj", "ac_gpu_uj", "ac_s", "batt_uj", "batt_s", "max_ac_w", "max_batt_w")
+    return [dict(zip(keys, r)) for r in db.execute(sql + " ORDER BY day", args)]
+
+
+def bucket_key(day, period):
+    date = datetime.date.fromisoformat(day)
+    if period == "week":
+        year, week, _ = date.isocalendar()
+        return f"{year}-W{week:02d}"
+    if period == "month":
+        return day[:7]
+    if period == "year":
+        return day[:4]
+    return day
+
+
+def bucket_span(key, period, now):
+    """(start, end) of a bucket as local datetimes, end clipped to now."""
+    if period == "day":
+        start = datetime.datetime.fromisoformat(key)
+        end = start + datetime.timedelta(days=1)
+    elif period == "week":
+        year, week = key.split("-W")
+        start = datetime.datetime.combine(datetime.date.fromisocalendar(int(year), int(week), 1), datetime.time())
+        end = start + datetime.timedelta(days=7)
+    elif period == "month":
+        year, month = map(int, key.split("-"))
+        start = datetime.datetime(year, month, 1)
+        end = datetime.datetime(year, month, calendar.monthrange(year, month)[1]) + datetime.timedelta(days=1)
+    else:
+        start = datetime.datetime(int(key), 1, 1)
+        end = datetime.datetime(int(key) + 1, 1, 1)
+    return start, min(end, now)
+
+
+def recent_keys(period, count, now):
+    """The last `count` bucket keys ending with the current one, oldest first."""
+    keys, cursor = [], now.date()
+    while len(keys) < count:
+        key = bucket_key(cursor.isoformat(), period)
+        if key not in keys:
+            keys.append(key)
+        if period in ("day", "custom"):
+            cursor -= datetime.timedelta(days=1)
+        elif period == "week":
+            cursor -= datetime.timedelta(days=7)
+        elif period == "month":
+            cursor = (cursor.replace(day=1) - datetime.timedelta(days=1))
+        else:
+            cursor = cursor.replace(year=cursor.year - 1, month=1, day=1)
+    return list(reversed(keys))
+
+
+def report(db, config, period, count, now=None):
+    now = now or datetime.datetime.now()
+    kind = "day" if period == "custom" else period
+    rows = daily_rows(db) if db else []
+    if kind == "year" and count <= 0:
+        years = sorted({r["day"][:4] for r in rows}) or [str(now.year)]
+        keys = years
+    else:
+        keys = recent_keys(kind, max(1, count), now)
+    grouped = {k: empty_parts() for k in keys}
+    for row in rows:
+        key = bucket_key(row["day"], kind)
+        if key in grouped:
+            add_parts(grouped[key], row)
+    first = rows[0]["day"] if rows else None
+    buckets, overall = [], empty_parts()
+    for key in keys:
+        parts = grouped[key]
+        add_parts(overall, parts)
+        start, end = bucket_span(key, kind, now)
+        span = max(0.0, (end - start).total_seconds())
+        entry = {"key": key, "label": bucket_label(key, kind, now)}
+        entry.update(totals(parts, config))
+        entry["coverage"] = round(min(1.0, entry["tracked_s"] / span), 3) if span > 0 else 0
+        entry["before_history"] = bool(first is not None and key < bucket_key(first, kind))
+        entry["cost_text"] = format_cost(entry["cost"], config)
+        buckets.append(entry)
+    total = totals(overall, config)
+    total["cost_text"] = format_cost(total["cost"], config)
+    return {"period": period, "buckets": buckets, "total": total}
+
+
+def bucket_label(key, period, now):
+    if period == "day":
+        date = datetime.date.fromisoformat(key)
+        if date == now.date():
+            return "Today"
+        if date == now.date() - datetime.timedelta(days=1):
+            return "Yesterday"
+        return date.strftime("%a %d %b")
+    if period == "week":
+        year, week = key.split("-W")
+        monday = datetime.date.fromisocalendar(int(year), int(week), 1)
+        return "This week" if monday <= now.date() < monday + datetime.timedelta(days=7) else "Week of " + monday.strftime("%d %b")
+    if period == "month":
+        year, month = map(int, key.split("-"))
+        return datetime.date(year, month, 1).strftime("%B %Y" if year != now.year else "%B")
+    return key
+
+
+def chart(db, config, days, now_ms=None, points=120):
+    """Average socket watts over the window, at most `points` points; a slot
+    with nothing tracked is None so the graph draws a gap."""
+    now_ms = now_ms or int(time.time() * 1000)
+    if not db:
+        return {"days": days, "points": [], "source": "none"}
+    if days > config["raw_retention_days"]:
+        return chart_daily(db, config, days, now_ms)
+    start = now_ms - days * 86400000
+    oldest = db.execute("SELECT MIN(ts) FROM samples").fetchone()[0]
+    if oldest is None:
+        return {"days": days, "points": [], "source": "samples"}
+    # Short history: the axis starts at the first sample, not at an empty window.
+    start = max(start, oldest - config["interval_s"] * 1000)
+    slot = max(1, (now_ms - start) / points)
+    sums = [empty_parts() for _ in range(points)]
+    for ts, dt, src, cpu, gpu, batt in db.execute(
+            "SELECT ts, dt, src, cpu_uj, gpu_uj, batt_uj FROM samples WHERE ts > ? ORDER BY ts", (start,)):
+        index = min(points - 1, int((ts - start) / slot))
+        if src == "battery":
+            sums[index]["batt_uj"] += batt or 0
+            sums[index]["batt_s"] += dt
+        else:
+            sums[index]["ac_cpu_uj"] += cpu or 0
+            sums[index]["ac_gpu_uj"] += gpu or 0
+            sums[index]["ac_s"] += dt
+    out = []
+    for i, parts in enumerate(sums):
+        t = totals(parts, config)
+        out.append([int(start + (i + 0.5) * slot), t["avg_w"] if parts["ac_s"] + parts["batt_s"] >= slot / 4000 else None])
+    return {"days": days, "points": out, "source": "samples", "start": int(start), "end": now_ms}
+
+
+def chart_daily(db, config, days, now_ms):
+    today = datetime.date.fromtimestamp(now_ms / 1000)
+    first = (today - datetime.timedelta(days=days - 1)).isoformat()
+    rows = {r["day"]: r for r in daily_rows(db, first)}
+    if rows:
+        first = max(first, min(rows))
+    out, cursor = [], datetime.date.fromisoformat(first)
+    while cursor <= today:
+        row = rows.get(cursor.isoformat())
+        noon = int(datetime.datetime.combine(cursor, datetime.time(12)).timestamp() * 1000)
+        if row:
+            parts = empty_parts()
+            add_parts(parts, row)
+            out.append([noon, totals(parts, config)["avg_w"]])
+        else:
+            out.append([noon, None])
+        cursor += datetime.timedelta(days=1)
+    start = int(datetime.datetime.combine(datetime.date.fromisoformat(first), datetime.time()).timestamp() * 1000)
+    return {"days": days, "points": out, "source": "daily", "start": start, "end": now_ms}
+
+
+def latest(db, config, now_ms=None):
+    """The newest interval, if it is recent enough to call live."""
+    now_ms = now_ms or int(time.time() * 1000)
+    if not db:
+        return None
+    row = db.execute("SELECT ts, dt, src, cpu_uj, gpu_uj, batt_uj FROM samples ORDER BY ts DESC LIMIT 1").fetchone()
+    if not row or now_ms - row[0] > max(3 * config["interval_s"], 30) * 1000:
+        return None
+    return reading(row[2], row[1], row[3], row[4], row[5], config, row[0])
+
+
+def reading(src, dt, cpu, gpu, batt, config, ts):
+    eff, base = config["psu_efficiency"], config["baseline_w"]
+    cpu_w = cpu / 1e6 / dt if cpu is not None and dt > 0 else None
+    gpu_w = gpu / 1e6 / dt if gpu is not None and dt > 0 else None
+    out = {"ts": ts, "source": src, "interval_s": round(dt, 1),
+           "cpu_dc_w": round(cpu_w, 1) if cpu_w is not None else None,
+           "gpu_dc_w": round(gpu_w, 1) if gpu_w is not None else None}
+    if src == "battery":
+        total = batt / 1e6 / dt if batt is not None and dt > 0 else None
+        out["battery_dc_w"] = round(total, 1) if total is not None else None
+        out["watts"] = round(total / eff, 1) if total is not None else None
+        known = (cpu_w or 0) + (gpu_w or 0)
+        out["cpu_w"] = round(cpu_w / eff, 1) if cpu_w is not None else None
+        out["gpu_w"] = round(gpu_w / eff, 1) if gpu_w is not None else None
+        out["rest_w"] = round(max(0.0, total - known) / eff, 1) if total is not None and cpu_w is not None else None
+        out["measured_share"] = 1.0 if total is not None else None
+        out["rest_measured"] = True
+    else:
+        known = (cpu_w or 0) + (gpu_w or 0)
+        dc = known + base
+        out["watts"] = round(dc / eff, 1) if cpu_w is not None else None
+        out["cpu_w"] = round(cpu_w / eff, 1) if cpu_w is not None else None
+        out["gpu_w"] = round((gpu_w or 0) / eff, 1)
+        out["rest_w"] = round(base / eff, 1)
+        out["measured_share"] = round(known / dc, 3) if cpu_w is not None and dc > 0 else None
+        out["rest_measured"] = False
+    return out
+
+
+def summary(db, config, now=None):
+    now = now or datetime.datetime.now()
+    today = report(db, config, "day", 1, now)["total"]
+    month = report(db, config, "month", 1, now)["total"]
+    return {"today": today, "month": month}
+
+
+# ----------------------------------------------------------------- sampler
+
+def emit(data):
+    try:
+        sys.stdout.write(json.dumps(data, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # The reader has gone (the tab closed): leave quietly.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(0)
+
+
+def boottime():
+    return time.clock_gettime(time.CLOCK_BOOTTIME)
+
+
+def load_ports():
+    """The ports helper next to this one, as a module (for --ports)."""
+    import importlib.machinery
+    import importlib.util
+    file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "omnisystem-center-ports")
+    loader = importlib.machinery.SourceFileLoader("omnisystem_center_ports", file)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def run(ports_every=0):
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    ports = None
+    if ports_every > 0:
+        try:
+            ports = load_ports()
+        except (OSError, ImportError, SyntaxError):
+            ports = None
+    last_ports = 0.0
+    lock = open(LOCK_PATH, "a")
+    parent = os.getppid()
+    # One sampler at a time: after a shell reload the old one may still be
+    # finishing; wait for it rather than count the same energy twice.
+    while True:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if os.getppid() != parent:
+                return 0
+            time.sleep(1)
+    config = load_config()
+    config_stamp = config_mtime()
+    db = connect()
+    gpu = Gpu(config["gpu_source"])
+    zones, _, _ = rapl_zones()
+    prev_rapl, prev_t = read_rapl(zones), boottime()
+    last_prune = 0
+    emit(dict({"type": "start", "gpu": gpu.kind, "cpu_counter": bool(zones)}, **summary_live(db, config)))
+    while True:
+        interval = config["interval_s"]
+        sub = min(config["gpu_interval_s"], interval)
+        gpu_uj, batt_uj = 0.0, 0.0
+        gpu_prev, batt_prev = gpu.read(not on_ac())[0], battery_watts()
+        sources = {"ac" if on_ac() else "battery"}
+        gpu_states, gpu_ok, batt_ok, slept = set(), gpu.kind is not None, True, False
+        tick = boottime()
+        while boottime() - prev_t < interval - 0.05:
+            time.sleep(max(0.05, min(sub, interval - (boottime() - prev_t))))
+            if os.getppid() != parent:
+                return 0
+            now_t = boottime()
+            step = now_t - tick
+            tick = now_t
+            if step > max(4 * sub, 30):
+                slept = True  # the machine slept; the interval is dropped below
+                break
+            current = "ac" if on_ac() else "battery"
+            sources.add(current)
+            g, state, gpus = gpu.read(current == "battery")
+            gpu_states.add(state)
+            if g is None or gpu_prev is None:
+                gpu_ok = False
+            else:
+                gpu_uj += (g + gpu_prev) / 2 * step * 1e6
+            gpu_prev = g
+            b = battery_watts()
+            if b is not None and batt_prev is not None:
+                batt_uj += (b + batt_prev) / 2 * step * 1e6
+            elif "battery" in sources:
+                batt_ok = False
+            batt_prev = b
+            # A quick line for the bar: what leaves the battery and whether
+            # the GPU is awake, every couple of seconds.
+            emit({"type": "tick", "source": current, "gpu": gpu.kind, "gpu_state": state,
+                  "gpu_w": round(g, 1) if g is not None else None, "gpus": gpus,
+                  "battery_w": round(b, 1) if b is not None else None})
+        now_t = boottime()
+        dt = now_t - prev_t
+        rapl_now = read_rapl(zones)
+        cpu_uj = rapl_delta(prev_rapl, rapl_now, dt, config["sanity_max_cpu_w"]) if zones else None
+        if not zones:
+            # The counter may become readable later (the one-time rule in
+            # docs/energy-meter.md); from the next interval on it is used.
+            zones = rapl_zones()[0]
+            rapl_now = read_rapl(zones)
+        prev_rapl, prev_t = rapl_now, now_t
+        now_ms = int(time.time() * 1000)
+        live = {"type": "live", "ts": now_ms, "gpu": gpu.kind, "gpu_state": "asleep" if gpu_states == {"asleep"} else
+                ("awake" if "awake" in gpu_states else "none"), "cpu_counter": bool(zones)}
+        reason = None
+        if slept or dt > max(4 * interval, 60):
+            reason = "slept"
+            bump(db, "dropped_gap")
+        elif len(sources) > 1:
+            reason = "switched"  # plugged in or out mid-interval
+        elif "battery" in sources:
+            if not batt_ok or batt_uj <= 0:
+                reason = "battery-unreadable"
+        elif cpu_uj is None:
+            reason = "cpu-counter-reset" if zones else "cpu-counter-unreadable"
+            if zones:
+                bump(db, "dropped_reset")
+        if reason is None:
+            src = next(iter(sources))
+            row = {"ts": now_ms, "dt": dt, "src": src,
+                   "cpu_uj": int(cpu_uj) if cpu_uj is not None else None,
+                   "gpu_uj": int(gpu_uj) if gpu.kind and gpu_ok else None,
+                   "batt_uj": int(batt_uj) if src == "battery" else None}
+            record(db, row)
+            if not meta(db, "first_ts"):
+                db.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('first_ts', ?)", (str(now_ms),))
+            if now_ms - last_prune > 3600000:
+                prune(db, config["raw_retention_days"], now_ms)
+                last_prune = now_ms
+            db.commit()
+            live.update(reading(row["src"], dt, row["cpu_uj"], row["gpu_uj"], row["batt_uj"], config, now_ms))
+        else:
+            db.commit()
+            live["untracked"] = reason
+            live["source"] = "battery" if "battery" in sources and len(sources) == 1 else "ac"
+        live.update(summary_live(db, config))
+        emit(live)
+        budget_check(db, config)
+        if ports and now_t - last_ports >= ports_every - 1:
+            last_ports = now_t
+            try:
+                emit(dict({"type": "ports"}, **ports.scan()))
+            except Exception:  # a ports failure must never stop the meter
+                pass
+        stamp = config_mtime()
+        if stamp != config_stamp:
+            config_stamp = stamp
+            try:
+                fresh = load_config()
+            except RefusedPath:
+                fresh = config
+            if fresh["gpu_source"] != config["gpu_source"]:
+                gpu = Gpu(fresh["gpu_source"])
+            config = fresh
+
+
+def budget_check(db, config):
+    """Once a month each: a line when this month's cost passes 80% and 100%
+    of the budget (the service turns it into a notification)."""
+    budget = config.get("monthly_budget") or 0
+    if budget <= 0 or not config.get("tariff"):
+        return
+    month = summary(db, config)["month"]
+    cost = month.get("cost") or 0
+    key_month = time.strftime("%Y-%m")
+    for level in (100, 80):
+        if cost >= budget * level / 100:
+            key = "budget-" + key_month + "-" + str(level)
+            if not meta(db, key):
+                db.execute("INSERT OR IGNORE INTO meta (key, value) VALUES (?, '1')", (key,))
+                db.commit()
+                emit({"type": "budget", "level": level, "cost": format_cost(cost, config),
+                      "budget": format_cost(budget, config), "kwh": month.get("kwh")})
+            break
+
+
+def export_csv(db, config, target):
+    rows = daily_rows(db) if db else []
+    lines = ["date,kwh,cost,currency,tracked_hours,coverage,avg_watts,max_watts,measured_share,battery_share"]
+    for row in rows:
+        parts = empty_parts()
+        add_parts(parts, row)
+        t = totals(parts, config)
+        span = 86400.0
+        lines.append(",".join(str(x) for x in (
+            row["day"], t["kwh"], "" if t["cost"] is None else round(t["cost"], 4), config["currency"] if t["cost"] is not None else "",
+            round(t["tracked_s"] / 3600, 2), round(min(1.0, t["tracked_s"] / span), 3),
+            "" if t["avg_w"] is None else t["avg_w"], "" if t["max_w"] is None else t["max_w"],
+            "" if t["measured_share"] is None else t["measured_share"],
+            "" if t["battery_share"] is None else t["battery_share"])))
+    if not target:
+        folder = os.environ.get("XDG_DOWNLOAD_DIR") or os.path.expanduser("~/Downloads")
+        if not os.path.isdir(folder):
+            folder = os.path.expanduser("~")
+        target = os.path.join(folder, "omnisystem-energy-" + time.strftime("%Y-%m-%d") + ".csv")
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    return {"ok": True, "file": target, "days": len(rows)}
+
+
+def summary_live(db, config):
+    s = summary(db, config)
+    return {
+        "today_kwh": s["today"]["kwh"], "today_cost": s["today"]["cost_text"],
+        "month_kwh": s["month"]["kwh"], "month_cost": s["month"]["cost_text"],
+    }
+
+
+def config_mtime():
+    try:
+        return os.stat(CONFIG_PATH).st_mtime_ns
+    except OSError:
+        return 0
+
+
+# ------------------------------------------------------------------ status
+
+def status(db, config):
+    used, unreadable, unused = rapl_zones()
+    gpu = Gpu(config["gpu_source"])
+    bat = battery_dir()
+    counts = {"samples": 0, "days": 0}
+    first = None
+    if db:
+        counts["samples"] = db.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+        counts["days"] = db.execute("SELECT COUNT(*) FROM daily").fetchone()[0]
+        first = meta(db, "first_ts")
+    # Only sysfs here: status never opens a GPU driver.
+    gpus = [{"id": d["id"], "vendor": d["vendor"], "integrated": d["integrated"], "measured": d["measured"],
+             "awake": pci_awake(d["dev"])} for d in gpu.devices]
+    awake = any(g["awake"] for g in gpus if g["measured"]) if gpu.kind else None
+    return {
+        "cpu": {"zones": [os.path.basename(z) for z in used],
+                "root_only": [os.path.basename(z) for z in unreadable],
+                "unused": unused},
+        "gpu": {"source": gpu.kind, "reason": gpu.reason, "awake": awake, "devices": gpus},
+        "battery": {"present": bool(bat), "name": os.path.basename(bat) if bat else "", "on_ac": on_ac()},
+        "laptop": chassis_is_laptop(),
+        "database": DB_PATH,
+        "config": CONFIG_PATH,
+        "rows": counts,
+        "first_sample": int(first) if first else None,
+        "dropped": {"slept": int(meta(db, "dropped_gap", 0) or 0) if db else 0,
+                    "counter_reset": int(meta(db, "dropped_reset", 0) or 0) if db else 0},
+        "settings": config,
+        "retroactive": list(RETROACTIVE),
+    }
+
+
+# --------------------------------------------------------------------- CLI
+
+def kwh_text(value):
+    return f"{value:.3f} kWh" if value is not None else "-"
+
+
+def print_report(data, config):
+    rows = data["buckets"]
+    print(f"  {'':16}{'kWh':>9}  {'cost':>10}  {'avg':>6}  {'max':>6}  tracked")
+    for b in rows:
+        avg = f"{b['avg_w']:.0f}W" if b["avg_w"] is not None else "-"
+        peak = f"{b['max_w']:.0f}W" if b["max_w"] is not None else "-"
+        print(f"  {b['label']:16}{b['kwh']:9.3f}  {b['cost_text'] or '-':>10}  {avg:>6}  {peak:>6}  {round(b['coverage'] * 100)}%")
+    t = data["total"]
+    print(f"  {'total':16}{t['kwh']:9.3f}  {t['cost_text'] or '-':>10}")
+
+
+def main(argv):
+    os.umask(0o077)
+    args = argv[1:]
+    as_json = "--json" in args
+    args = [a for a in args if a != "--json"]
+    count = None
+    if "-n" in args:
+        i = args.index("-n")
+        try:
+            count = int(args[i + 1])
+        except (IndexError, ValueError):
+            print("omnisystem-center-energy: -n needs a number", file=sys.stderr)
+            return 64
+        del args[i:i + 2]
+    command = args[0] if args else "now"
+    try:
+        config = load_config()
+        if command == "run":
+            every = 0
+            if "--ports" in args:
+                try:
+                    every = max(5, int(args[args.index("--ports") + 1]))
+                except (IndexError, ValueError):
+                    every = 20
+            return run(every)
+        if command == "currencies":
+            data = [{"code": c, "symbol": s, "decimals": d} for c, (s, d) in sorted(CURRENCIES.items())]
+            if as_json:
+                print(json.dumps(data))
+            else:
+                for c in data:
+                    print(f"  {c['code']}  {c['symbol']:6} {c['decimals']} decimals")
+            return 0
+        if command == "config":
+            changes = args[1:]
+            for change in changes:
+                if "=" not in change:
+                    raise ValueError(f"expected KEY=VALUE, got {change}")
+                key, value = change.split("=", 1)
+                config[key.strip()] = validate(key.strip(), value)
+            if changes:
+                save_config(config)
+            if as_json:
+                print(json.dumps({"settings": config, "retroactive": list(RETROACTIVE)}))
+            else:
+                for key, value in config.items():
+                    note = "applies to all history" if key in RETROACTIVE else "applies to new samples"
+                    print(f"  {key:20} {value!s:12} {note}")
+            return 0
+        db = connect(create=False)
+        if command == "now":
+            data = {"now": latest(db, config)}
+            data.update(summary(db, config))
+            if as_json:
+                print(json.dumps(data))
+            else:
+                n = data["now"]
+                if n and n.get("watts") is not None:
+                    print(f"  now    {n['watts']:7.1f} W  at the socket, {n['source']}, "
+                          f"{round((n['measured_share'] or 0) * 100)}% measured")
+                else:
+                    print("  now    no live reading (is the shell running?)")
+                print(f"  today  {kwh_text(data['today']['kwh'])}  {data['today']['cost_text']}")
+                print(f"  month  {kwh_text(data['month']['kwh'])}  {data['month']['cost_text']}")
+            return 0
+        if command == "report":
+            period = args[1] if len(args) > 1 else "day"
+            if period not in ("day", "week", "month", "year"):
+                raise ValueError("period is day, week, month or year")
+            default = {"day": 14, "week": 8, "month": 12, "year": 0}[period]
+            data = report(db, config, period, default if count is None else count)
+            if as_json:
+                print(json.dumps(data))
+            else:
+                print_report(data, config)
+            return 0
+        if command == "chart":
+            days = int(args[1]) if len(args) > 1 else 1
+            if not 1 <= days <= 3660:
+                raise ValueError("days is 1 to 3660")
+            print(json.dumps(chart(db, config, days)))
+            return 0
+        if command == "panel":
+            period = args[1] if len(args) > 1 else "day"
+            if period not in ("day", "week", "month", "year", "custom"):
+                raise ValueError("period is day, week, month, year or custom")
+            custom = max(1, min(365, count or 14))
+            spans = {"day": (1, 14), "week": (7, 8), "month": (30, 12), "year": (365, 0), "custom": (custom, custom)}
+            days, buckets = spans[period]
+            data = {
+                "now": latest(db, config),
+                "summary": summary(db, config),
+                "report": report(db, config, period, buckets),
+                "chart": chart(db, config, days),
+                "settings": config,
+                "currency": {"symbol": money(config)[0], "decimals": money(config)[1]},
+                "currencies": [{"value": c, "label": f"{c}  {sym}"} for c, (sym, _) in sorted(CURRENCIES.items())],
+                "status": status(db, config),
+            }
+            print(json.dumps(data))
+            return 0
+        if command == "export":
+            print(json.dumps(export_csv(db, config, args[1] if len(args) > 1 else "")))
+            return 0
+        if command == "status":
+            data = status(db, config)
+            if as_json:
+                print(json.dumps(data))
+            else:
+                print(json.dumps(data, indent=2))
+            return 0
+    except RefusedPath as error:
+        print(f"omnisystem-center-energy: {error}", file=sys.stderr)
+        return 1
+    except ValueError as error:
+        print(f"omnisystem-center-energy: {error}", file=sys.stderr)
+        return 2
+    print(__doc__.split("\n\n")[1], file=sys.stderr)
+    return 64
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
