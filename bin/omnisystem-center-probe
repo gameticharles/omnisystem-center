@@ -512,6 +512,83 @@ PCI_CLASSES = {"0300": "Graphics", "0302": "Graphics", "0380": "Graphics", "0200
                "0403": "Audio", "0401": "Audio", "0c03": None, "0108": None, "0d11": "Bluetooth"}
 
 
+CACHE_HOME = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+GPU_MEMORY_CACHE = os.path.join(CACHE_HOME, "omnisystem-center", "gpu-memory.json")
+
+
+def nvidia_memory(bus):
+    """Total and used memory of an NVIDIA card from NVML, asked only while it
+    is awake; the total is remembered for when it sleeps."""
+    import ctypes
+
+    class Memory(ctypes.Structure):
+        _fields_ = [("total", ctypes.c_ulonglong), ("free", ctypes.c_ulonglong), ("used", ctypes.c_ulonglong)]
+
+    try:
+        lib = ctypes.CDLL("libnvidia-ml.so.1")
+    except OSError:
+        return None
+    if lib.nvmlInit_v2() != 0:
+        return None
+    try:
+        handle = ctypes.c_void_p()
+        if lib.nvmlDeviceGetHandleByPciBusId_v2(bus.encode(), ctypes.byref(handle)) != 0:
+            return None
+        mem = Memory()
+        if lib.nvmlDeviceGetMemoryInfo(handle, ctypes.byref(mem)) != 0:
+            return None
+        version = ctypes.create_string_buffer(96)
+        driver = version.value.decode() if lib.nvmlSystemGetDriverVersion(version, 96) == 0 else ""
+        return {"total": mem.total, "used": mem.used, "driver": driver}
+    finally:
+        lib.nvmlShutdown()
+
+
+def gpu_memory(dev, vendor_id, integrated, asleep):
+    """What a GPU has to work with: its own memory (total, and used when it can
+    be read without waking it), or that it shares the system's."""
+    bus = os.path.basename(dev)
+    if vendor_id == "1002":
+        total = number(read(os.path.join(dev, "mem_info_vram_total")), 0)
+        used = number(read(os.path.join(dev, "mem_info_vram_used")), 0) if not asleep else 0
+        gtt = number(read(os.path.join(dev, "mem_info_gtt_total")), 0)
+        if total:
+            return {"total": int(total), "used": int(used) if not asleep else None, "shared": integrated,
+                    "gtt": int(gtt) if integrated else 0}
+    if vendor_id == "8086":
+        for pattern in ("drm/card*/lmem_total_bytes", "drm/card*/prelim_lmem_total_bytes", "tile0/vram*/physical_vram_size_bytes"):
+            for file in glob.glob(os.path.join(dev, pattern)):
+                total = number(read(file), 0)
+                if total:
+                    return {"total": int(total), "used": None, "shared": False}
+        if integrated:
+            freq = 0
+            for file in glob.glob(os.path.join(dev, "drm/card*/gt_max_freq_mhz")) + glob.glob(os.path.join(dev, "drm/card*/gt/gt0/rps_max_freq_mhz")):
+                freq = max(freq, number(read(file), 0))
+            return {"total": 0, "used": None, "shared": True, "maxMHz": int(freq) if freq else None}
+    if vendor_id == "10de":
+        cache = {}
+        try:
+            with open(GPU_MEMORY_CACHE) as handle:
+                cache = json.load(handle)
+        except (OSError, ValueError):
+            cache = {}
+        if not asleep and ROOT == "/":
+            got = nvidia_memory(bus)
+            if got:
+                cache[bus] = {"total": got["total"], "driver": got["driver"]}
+                try:
+                    os.makedirs(os.path.dirname(GPU_MEMORY_CACHE), exist_ok=True)
+                    with open(GPU_MEMORY_CACHE, "w") as handle:
+                        json.dump(cache, handle)
+                except OSError:
+                    pass
+                return {"total": got["total"], "used": got["used"], "shared": False, "driver": got["driver"]}
+        if bus in cache:
+            return {"total": cache[bus]["total"], "used": None, "shared": False, "driver": cache[bus].get("driver", "")}
+    return None
+
+
 def pci_hardware():
     vendors, devices = pci_names()
     out = []
@@ -525,8 +602,12 @@ def pci_hardware():
         name = short_device(devices.get(vid + ":" + did, did))
         driver = os.path.basename(os.path.realpath(os.path.join(dev, "driver"))) if os.path.exists(os.path.join(dev, "driver")) else ""
         state = read(os.path.join(dev, "power/runtime_status"))
-        out.append({"kind": kind, "name": f"{vendor} {name}".strip(), "driver": driver,
-                    "asleep": state == "suspended"})
+        entry = {"kind": kind, "name": f"{vendor} {name}".strip(), "driver": driver, "asleep": state == "suspended"}
+        if kind == "Graphics":
+            integrated = dev.split(":")[1:2] == ["00"] if vid == "8086" else (vid == "1002" and number(read(os.path.join(dev, "mem_info_vram_total")), 0) <= 2 * 1024 ** 3)
+            entry["integrated"] = integrated
+            entry["memory"] = gpu_memory(dev, vid, integrated, state == "suspended")
+        out.append(entry)
     return out
 
 

@@ -11,7 +11,7 @@
     --accent: #e68e0d;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { width: 2000px; height: 1400px; background: var(--bg); }
+  html, body { width: 2000px; height: 1240px; background: var(--bg); }
   body {
     font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", monospace;
     color: var(--text);
@@ -45,7 +45,7 @@
   figcaption span { font-size: 21px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .shots { justify-content: space-between; }
   figure img {
-    display: block; width: 580px; height: 780px; object-fit: cover; object-position: top;
+    display: block; width: 580px; height: 596px; object-fit: cover; object-position: top;
     border-radius: 4px;
     box-shadow: 0 30px 60px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.03);
   }
@@ -66,7 +66,7 @@
       <div class="icon">󰂄</div>
       <div>
         <h1>OmniSystem <span>Center</span></h1>
-        <p class="tagline">Battery, energy, sensors, processes, ports and plugins in one panel.</p>
+        <p class="tagline">Your whole machine in one Omarchy panel.</p>
       </div>
     </div>
     <div class="pills">
@@ -85,22 +85,22 @@
       <img src="overview.png">
     </figure>
     <figure>
-      <figcaption><b>ENERGY</b><span>kWh and cost, measured share</span></figcaption>
-      <img src="energy.png">
+      <figcaption><b>PROCESSES</b><span>CPU, GPU, memory, end or kill</span></figcaption>
+      <img src="processes.png">
     </figure>
     <figure>
-      <figcaption><b>SYSTEM</b><span>sensors, GPUs, the hardware</span></figcaption>
-      <img src="system.png">
+      <figcaption><b>PLUGINS</b><span>installed, marketplace, the bar</span></figcaption>
+      <img src="plugins.png">
     </figure>
   </section>
 
   <section class="features">
-    <div class="f"><i>󱐋</i><div><b>Live draw in the bar</b><p>What the machine draws, and a GPU icon with its watts while one is awake.</p></div></div>
-    <div class="f"><i>󰠠</i><div><b>Energy and cost</b><p>Per day, week, month and year; never an estimate shown as a measurement.</p></div></div>
-    <div class="f"><i>󰂏</i><div><b>Charge care</b><p>Limit, sailing, top-up, heat protection and calibration where the hardware allows.</p></div></div>
-    <div class="f"><i>󰋋</i><div><b>Gadget batteries</b><p>Mice, keyboards, headsets and earbuds, per earbud and case.</p></div></div>
-    <div class="f"><i>󰀪</i><div><b>Warnings that stick</b><p>Low and critical levels, with a countdown you can cancel.</p></div></div>
-    <div class="f"><i>󰐥</i><div><b>Power at hand</b><p>Profiles per power source, keep awake, sleep timer, lock to shutdown.</p></div></div>
+    <div class="f"><i>󱐋</i><div><b>Energy and cost</b><p>Live draw and GPU in the bar; kWh, cost and a monthly budget per day to year.</p></div></div>
+    <div class="f"><i>󰂏</i><div><b>Battery care</b><p>Charge limit (kernel, Apple, UPower, Acer), sailing, top-up, heat protection.</p></div></div>
+    <div class="f"><i>󰊚</i><div><b>System</b><p>Every sensor and GPU, memory, disk and swap, and what the machine is.</p></div></div>
+    <div class="f"><i>󰒍</i><div><b>Ports</b><p>Listeners by project, how far each reaches, dev servers counted in the bar.</p></div></div>
+    <div class="f"><i>󰐱</i><div><b>Plugins</b><p>Marketplace with reviewed installs, update previews, bar layout, widget settings.</p></div></div>
+    <div class="f"><i>󰐥</i><div><b>Power at hand</b><p>Sleep checks, warnings, profiles, keep awake, timer, lock to shutdown.</p></div></div>
   </section>
 </body>
 </html>

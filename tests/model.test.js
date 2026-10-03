@@ -755,5 +755,13 @@ test("dev rules", () => {
   assert.deepStrictEqual(M.toggleDevProgram({ dev: "a, b", notDev: "" }, "a", false), { devPrograms: "b", notDevPrograms: "a" })
 })
 
+test("gpu memory text", () => {
+  assert.strictEqual(M.gpuMemoryText({ total: 6442450944, used: 361037824, shared: false, driver: "610.57.04" }), "6 GB VRAM · 344 MB used · driver 610.57.04")
+  assert.strictEqual(M.gpuMemoryText({ total: 0, used: null, shared: true, maxMHz: 1450 }), "Shares system memory · up to 1.45 GHz")
+  assert.strictEqual(M.gpuMemoryText({ total: 536870912, used: 100 * 1048576, shared: true }), "512 MB reserved + shared · 100 MB used")
+  assert.strictEqual(M.gpuMemoryText({ total: 8589934592, used: null, shared: false }), "8 GB VRAM", "asleep: the remembered total only")
+  assert.strictEqual(M.gpuMemoryText(null), "")
+})
+
 console.log(failures === 0 ? "\nAll tests passed." : `\n${failures} test(s) failed.`)
 process.exit(failures === 0 ? 0 : 1)

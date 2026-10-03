@@ -101,9 +101,13 @@ panel had outgrown the battery; never released under that name.
   Controls and Care tabs and the Suspend and Hibernate buttons
   (docs/sleep.md).
 - Acer health mode (acer-wmi-battery) as a charge-limit backend.
+- System → Hardware: each GPU's memory (AMD VRAM and use from sysfs; NVIDIA
+  total and use from NVML while awake, the total remembered for when it
+  sleeps, and the driver version; integrated Intel as shared memory with its
+  top clock).
 - The background ports scan runs inside the energy sampler, and NVML stays
   open only while the NVIDIA card is awake: the sampler's cost fell from
-  about 560 ms to well under 100 ms of CPU a minute.
+  about 560 ms to about 150 ms of CPU a minute, the port scans included.
 - The panel is wider (560 px by default), the tabs sit fixed above the
   content, with the open tab named in its own theme colour and the others
   as icons, and colours (graphs, meters, the power buttons) follow the

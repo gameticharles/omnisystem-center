@@ -373,7 +373,8 @@ Column {
         required property var modelData
         label: modelData.kind
         value: modelData.name
-        detail: [modelData.driver, modelData.asleep ? "asleep" : ""].filter(function(x) { return x }).join(" · ")
+        detail: [Model.gpuMemoryText(modelData.memory), modelData.memory && modelData.memory.driver ? "" : modelData.driver,
+                 modelData.asleep ? "asleep" : ""].filter(function(x) { return x }).join(" · ")
         foreground: view.fg
         fontFamily: view.ff
         onCopyRequested: function(t) { view.copy(t) }

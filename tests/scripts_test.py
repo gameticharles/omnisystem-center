@@ -171,6 +171,26 @@ class DeviceTest(Fake):
         self.assertTrue(names["Graphics"]["asleep"])
         self.assertEqual(names["Ethernet"]["name"], "Realtek Killer E3000 2.5GbE Controller")
 
+    def test_gpu_memory(self):
+        put(self.root, "usr/share/hwdata/pci.ids", "1002  Advanced Micro Devices, Inc. [AMD/ATI]\n\t73bf  Navi 21 [Radeon RX 6800]\n"
+                                                    "8086  Intel Corporation\n\t9a68  TigerLake-H GT1 [UHD Graphics]\n")
+        amd = "sys/bus/pci/devices/0000:03:00.0/"
+        put(self.root, amd + "vendor", "0x1002\n")
+        put(self.root, amd + "device", "0x73bf\n")
+        put(self.root, amd + "class", "0x030000\n")
+        put(self.root, amd + "mem_info_vram_total", str(16 * 1024 ** 3) + "\n")
+        put(self.root, amd + "mem_info_vram_used", str(2 * 1024 ** 3) + "\n")
+        igpu = "sys/bus/pci/devices/0000:00:02.0/"
+        put(self.root, igpu + "vendor", "0x8086\n")
+        put(self.root, igpu + "device", "0x9a68\n")
+        put(self.root, igpu + "class", "0x030000\n")
+        put(self.root, igpu + "drm/card0/gt_max_freq_mhz", "1450\n")
+        gpus = {g["name"].split()[0]: g for g in self.device()["pci"] if g["kind"] == "Graphics"}
+        self.assertEqual(gpus["AMD"]["memory"], {"total": 16 * 1024 ** 3, "used": 2 * 1024 ** 3, "shared": False, "gtt": 0})
+        self.assertFalse(gpus["AMD"]["integrated"])
+        self.assertEqual(gpus["Intel"]["memory"], {"total": 0, "used": None, "shared": True, "maxMHz": 1450})
+        self.assertTrue(gpus["Intel"]["integrated"])
+
     def test_usb_skips_hubs_and_controllers(self):
         self.assertEqual([u["name"] for u in self.device()["usb"]], ["SunplusIT Inc HD User Facing"])
 

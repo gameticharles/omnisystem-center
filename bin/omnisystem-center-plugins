@@ -2,7 +2,9 @@
 """Omarchy plugins for OmniSystem Center's Plugins tab.
 
     omnisystem-center-plugins local                what is installed, with manifests and git state
-    omnisystem-center-plugins catalog [--refresh]  the marketplace feed, reduced and cached
+    omnisystem-center-plugins catalog [--refresh|--cached]
+                                                   the marketplace feed, reduced and cached;
+                                                   --cached answers from the copy here only
     omnisystem-center-plugins thumbs ID ...        cache preview thumbnails, print id -> file
     omnisystem-center-plugins preview ID           cache the full-size preview, print its file
     omnisystem-center-plugins updates [--refresh]  which git-installed plugins have a newer commit
@@ -184,7 +186,7 @@ def fetch(url, limit, headers=None):
         raise
 
 
-def catalog(refresh):
+def catalog(refresh, cached_only=False):
     path = os.path.join(CACHE, "catalog.json")
     meta_path = os.path.join(CACHE, "catalog.meta.json")
     meta = read_json(meta_path, {}) or {}
@@ -193,6 +195,8 @@ def catalog(refresh):
         cached, meta = None, {}
     fresh = cached is not None and time.time() - meta.get("checked", 0) < 600
     offline = False
+    if cached_only:
+        return {"plugins": cached or [], "offline": False, "stale": not fresh, "checked": int(meta.get("checked", 0) * 1000)}
     if refresh or not fresh:
         headers = {}
         if cached is not None and meta.get("etag"):
@@ -452,7 +456,7 @@ def main(argv):
         print(json.dumps(local()))
         return 0
     if command == "catalog":
-        print(json.dumps(catalog(refresh)))
+        print(json.dumps(catalog(refresh, "--cached" in argv)))
         return 0
     if command == "thumbs":
         print(json.dumps(thumbs(argv[2:])))

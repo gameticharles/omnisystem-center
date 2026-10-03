@@ -16,7 +16,7 @@ firmware lets it cap the charge gets a charge limit, sailing mode, top-up and
 heat protection; one that cannot gets an unplug reminder instead. A desktop
 gets its gadgets first and no battery section at all.
 
-![OmniSystem Center: the Overview, Energy and System tabs](preview.png)
+![OmniSystem Center: the Overview, Processes and Plugins tabs](preview.png)
 
 OmniSystem Center replaces Omarchy's built-in **Power** widget, so it sits
 where that one was and answers the same `omarchy.power` commands. Disable it

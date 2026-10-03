@@ -1651,13 +1651,25 @@ Item {
     run([pluginsCmd, "local"], null, function(code, out) {
       try { root.pluginLocal = JSON.parse(out) } catch (e) {}
     })
-    if (force || pluginCatalog.length === 0) {
+    // The copy here at once, then (when it is old, or asked) a fresh one in
+    // the background that replaces it when it lands.
+    if (pluginCatalog.length === 0) {
       catalogLoading = true
-      run(force ? [pluginsCmd, "catalog", "--refresh"] : [pluginsCmd, "catalog"], null, function(code, out) {
-        root.catalogLoading = false
-        try { var d = JSON.parse(out); root.pluginCatalog = d.plugins || []; root.catalogOffline = !!d.offline } catch (e) {}
+      run([pluginsCmd, "catalog", "--cached"], null, function(code, out) {
+        try {
+          var d = JSON.parse(out)
+          if (d.plugins && d.plugins.length && root.pluginCatalog.length === 0) root.pluginCatalog = d.plugins
+        } catch (e) {}
       })
     }
+    run(force ? [pluginsCmd, "catalog", "--refresh"] : [pluginsCmd, "catalog"], null, function(code, out) {
+      root.catalogLoading = false
+      try {
+        var d = JSON.parse(out)
+        if (d.plugins && d.plugins.length) root.pluginCatalog = d.plugins
+        root.catalogOffline = !!d.offline
+      } catch (e) {}
+    })
     run(force ? [pluginsCmd, "stats", "--refresh"] : [pluginsCmd, "stats"], null, function(code, out) {
       try { root.pluginStats = JSON.parse(out) } catch (e) {}
     })
