@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../lib/Model.js" as Model
 import "../components"
 
@@ -24,7 +25,7 @@ Column {
 
   // Colours from the theme: the CPU first (the accent), memory, then one per
   // GPU, the same GPU keeping its colour on both GPU graphs.
-  readonly property var colors: Model.seriesColors(panel.palette, 2 + s.gpus.length, String(Color.background))
+  readonly property var colors: Model.seriesColors(panel.palette, 2 + s.gpus.length, String(Commons.Color.background))
   function gpuColor(id) {
     for (var i = 0; i < s.gpus.length; i++) if (s.gpus[i].id === id) return colors[2 + i]
     return fg
@@ -185,7 +186,7 @@ Column {
           anchors.right: parent.right
           textFormat: Text.PlainText
           text: view.s.disk ? Model.formatGB(view.s.disk.free) + " free of " + Model.formatGB(view.s.disk.total) : ""
-          color: parent.parent.tight ? Color.urgent : view.fg
+          color: parent.parent.tight ? Commons.Color.urgent : view.fg
           font.family: view.ff
           font.pixelSize: Style.font.bodySmall
         }
@@ -194,7 +195,7 @@ Column {
         width: parent.width
         implicitHeight: Style.space(6)
         value: parent.used
-        color: parent.tight ? Color.urgent : view.colors[0]
+        color: parent.tight ? Commons.Color.urgent : view.colors[0]
       }
     }
 
@@ -225,7 +226,7 @@ Column {
             anchors.right: parent.right
             textFormat: Text.PlainText
             text: Model.formatBytes(parent.parent.sw.used) + " used of " + Model.formatBytes(parent.parent.sw.size)
-            color: parent.parent.used > 0.8 ? Color.urgent : view.fg
+            color: parent.parent.used > 0.8 ? Commons.Color.urgent : view.fg
             font.family: view.ff
             font.pixelSize: Style.font.bodySmall
           }
@@ -234,7 +235,7 @@ Column {
           width: parent.width
           implicitHeight: Style.space(6)
           value: parent.used
-          color: parent.used > 0.8 ? Color.urgent : view.colors[1]
+          color: parent.used > 0.8 ? Commons.Color.urgent : view.colors[1]
         }
       }
     }
@@ -256,7 +257,7 @@ Column {
         label: modelData.group + (modelData.label && modelData.label !== modelData.group ? " · " + modelData.label : "")
         value: Math.round(modelData.c) + " °C"
         detail: modelData.detail
-        valueColor: modelData.c >= 90 ? Color.urgent : view.fg
+        valueColor: modelData.c >= 90 ? Commons.Color.urgent : view.fg
         foreground: view.fg
         fontFamily: view.ff
         onCopyRequested: function(t) { view.copy(label + " " + t) }

@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../lib/Model.js" as Model
 import "../components"
 
@@ -36,7 +37,7 @@ Column {
         id: healthBig
         textFormat: Text.PlainText
         text: view.b.health + "%"
-        color: view.b.health < 50 ? Color.urgent : view.fg
+        color: view.b.health < 50 ? Commons.Color.urgent : view.fg
         font.family: view.ff
         font.pixelSize: Style.font.displayLarge
         font.bold: true
@@ -59,7 +60,7 @@ Column {
           width: parent.width
           implicitHeight: Style.space(6)
           value: view.b.health / 100
-          color: view.b.health < 50 ? Color.urgent : view.panel.palette.accent
+          color: view.b.health < 50 ? Commons.Color.urgent : view.panel.palette.accent
         }
       }
     }

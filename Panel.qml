@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import Quickshell
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "lib/Model.js" as Model
 import "components"
 import "views"
@@ -45,13 +46,13 @@ Panel {
   }
 
   readonly property bool ready: !!service
-  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property color foreground: bar ? bar.foreground : Commons.Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color dim: Qt.darker(foreground, 1.4)
   readonly property bool hasBattery: ready && service.hasBattery
   // The theme's palette (accent, red, yellow, green, blue, …), read by the
   // service from the current theme's colors.toml.
-  readonly property var palette: ready ? service.palette : ({ accent: Color.accent, red: Color.urgent })
+  readonly property var palette: ready ? service.palette : ({ accent: Commons.Color.accent, red: Commons.Color.urgent })
   function actionColor(key) { return Model.actionColor(key, palette, foreground) }
 
   // ------------------------------------------------------------------ tabs
@@ -371,7 +372,7 @@ Panel {
             required property var modelData
             required property int index
             readonly property bool open: root.tab === modelData.value
-            readonly property color tint: Model.tabTint(modelData.value, root.palette, String(Color.background))
+            readonly property color tint: Model.tabTint(modelData.value, root.palette, String(Commons.Color.background))
             Layout.fillWidth: open
             Layout.preferredWidth: open ? -1 : Style.space(34)
             text: open ? modelData.label : ""
@@ -434,7 +435,7 @@ Panel {
           // The critical action counting down.
           Card {
             visible: root.ready && root.service.criticalPending
-            tint: Color.urgent
+            tint: Commons.Color.urgent
             foreground: root.foreground
             fontFamily: root.fontFamily
             text: root.ready ? "Battery critical at " + root.service.level + "%. " +
@@ -465,7 +466,7 @@ Panel {
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
                 text: modelData.text
-                color: modelData.level === "error" ? Color.urgent : root.dim
+                color: modelData.level === "error" ? Commons.Color.urgent : root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
               }
@@ -562,7 +563,7 @@ Panel {
         id: lightbox
         anchors.fill: parent
         visible: root.ready && !!root.service.lightbox
-        color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.94)
+        color: Qt.rgba(Commons.Color.background.r, Commons.Color.background.g, Commons.Color.background.b, 0.94)
         radius: Style.cornerRadius
         z: 50
         readonly property var box: root.ready ? root.service.lightbox : null

@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // A small rounded label: verified, installed, stars, reach, an update.
 // `filled` washes it in its colour; otherwise only the outline is coloured.
@@ -7,7 +8,7 @@ Rectangle {
   id: pill
 
   property string text: ""
-  property color tint: Color.accent
+  property color tint: Commons.Color.accent
   property bool filled: false
   property string fontFamily: Style.font.family
 

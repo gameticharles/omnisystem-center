@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import "../lib/Model.js" as Model
 
 // Several readings with their recent history on one small graph: a label, a
@@ -15,7 +16,7 @@ Item {
   property real ceiling: 100
   property bool shown: true
   property string emptyText: ""
-  property color foreground: Color.foreground
+  property color foreground: Commons.Color.foreground
   property string fontFamily: Style.font.family
 
   visible: shown

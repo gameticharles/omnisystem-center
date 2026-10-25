@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] - 2026-10-23
+
+### Fixed
+
+- OmniSystem Center lost the Omarchy theme colours after the Omarchy 4.0.6 update (Qt
+  6.12). Qt 6.12 adds a global `Color` object to QtQuick that wins over the
+  imported `qs.Commons` singleton, so `Color.background`, `Color.accent` and
+  the rest were undefined and the plugin fell back to its hard-coded colours.
+  Every use is now qualified as `Commons.Color` (`import qs.Commons as
+  Commons`). Use the qualified form in new code; a bare `Color` means
+  QtQuick's.
+
 ## [1.0.0] - 2026-10-03
 
 First release. Replaces Omarchy's Power widget (`omarchy.power`) and can take

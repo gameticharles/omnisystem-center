@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../lib/Model.js" as Model
 import "../components"
 
@@ -15,7 +16,7 @@ Column {
   readonly property color fg: panel.foreground
   readonly property string ff: panel.fontFamily
   readonly property color dim: panel.dim
-  readonly property color accent: Model.tabTint("settings", panel.palette, String(Color.background))
+  readonly property color accent: Model.tabTint("settings", panel.palette, String(Commons.Color.background))
   readonly property var sections: Model.settingSections(s.ownSchema)
 
   spacing: Style.space(14)

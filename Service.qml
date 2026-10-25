@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Services.UPower
 import qs.Commons
+import qs.Commons as Commons
 import "lib/Model.js" as Model
 import "components"
 
@@ -1294,14 +1295,14 @@ Item {
   // The current theme's named colours, so graphs, meters and the power
   // buttons follow the theme. Read again whenever the shell's colours change
   // (a theme switch), since the theme folder itself is swapped, not edited.
-  property var palette: Model.parseThemeColors("", String(Color.accent), String(Color.urgent))
+  property var palette: Model.parseThemeColors("", String(Commons.Color.accent), String(Commons.Color.urgent))
 
   FileView {
     id: themeFile
-    path: Color.currentThemePath + "/colors.toml"
+    path: Commons.Color.currentThemePath + "/colors.toml"
     printErrors: false
-    onLoaded: root.palette = Model.parseThemeColors(text(), String(Color.accent), String(Color.urgent))
-    onLoadFailed: root.palette = Model.parseThemeColors("", String(Color.accent), String(Color.urgent))
+    onLoaded: root.palette = Model.parseThemeColors(text(), String(Commons.Color.accent), String(Commons.Color.urgent))
+    onLoadFailed: root.palette = Model.parseThemeColors("", String(Commons.Color.accent), String(Commons.Color.urgent))
   }
 
   Connections {

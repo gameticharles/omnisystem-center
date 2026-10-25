@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // A reading with its recent history: label and value over a small graph.
 Item {
@@ -11,7 +12,7 @@ Item {
   property int slots: 60
   property real ceiling: 100
   property bool shown: true
-  property color foreground: Color.foreground
+  property color foreground: Commons.Color.foreground
   property color lineColor: foreground
   property string fontFamily: Style.font.family
 

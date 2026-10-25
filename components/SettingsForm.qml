@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 // A form from a manifest's `barWidget.schema`: each entry gets its label, its
 // description and a control for its type (a switch, a row of choices, a
@@ -11,8 +12,8 @@ Column {
 
   property var schema: []
   property var values: ({})
-  property color foreground: Color.foreground
-  property color accent: Color.accent
+  property color foreground: Commons.Color.foreground
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.family
   property var panel: null
   signal changed(string key, var value)

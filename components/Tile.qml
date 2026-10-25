@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // A list tile: rounded, a faint border, a hover wash, and the tint's wash and
 // border while selected. The tile's contents are its children; `clicked`
@@ -8,8 +9,8 @@ Item {
   id: tile
 
   property bool selected: false
-  property color tint: Color.accent
-  property color foreground: Color.foreground
+  property color tint: Commons.Color.accent
+  property color foreground: Commons.Color.foreground
   property bool alert: false
   // The keyboard cursor: a stronger border in the tint.
   property bool focused: false
@@ -27,7 +28,7 @@ Item {
     border.width: tile.focused ? 1.5 : 1
     border.color: tile.focused ? Qt.rgba(tile.tint.r, tile.tint.g, tile.tint.b, 0.95)
                 : tile.selected ? Qt.rgba(tile.tint.r, tile.tint.g, tile.tint.b, 0.55)
-                : tile.alert ? Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.55)
+                : tile.alert ? Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.55)
                 : Util.alpha(tile.foreground, tile.hovered ? 0.16 : 0.08)
     Behavior on color { ColorAnimation { duration: 120 } }
   }
@@ -41,7 +42,7 @@ Item {
     anchors.bottomMargin: Style.space(6)
     width: 3
     radius: 1.5
-    color: Color.urgent
+    color: Commons.Color.urgent
   }
   MouseArea {
     id: area

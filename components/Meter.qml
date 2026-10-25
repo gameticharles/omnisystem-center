@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // A thin horizontal level bar, 0..1, with an optional marker (e.g. the charge
 // limit) and a pulse while `pulsing`.
@@ -8,8 +9,8 @@ Item {
 
   property real value: 0
   property real marker: -1
-  property color color: Color.foreground
-  property color markerColor: Color.accent
+  property color color: Commons.Color.foreground
+  property color markerColor: Commons.Color.accent
   property bool pulsing: false
 
   implicitHeight: Style.space(8)

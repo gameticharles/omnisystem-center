@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 // A panel section: separator, small-caps title with optional trailing note,
 // then its rows. The rows are this item's children.
@@ -10,7 +11,7 @@ Column {
   property string title: ""
   property string trailing: ""
   property bool separator: true
-  property color foreground: Color.foreground
+  property color foreground: Commons.Color.foreground
   property string fontFamily: Style.font.family
   default property alias content: body.data
 

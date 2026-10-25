@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../lib/Model.js" as Model
 import "../components"
 
@@ -16,7 +17,7 @@ Column {
   readonly property color fg: panel.foreground
   readonly property string ff: panel.fontFamily
   readonly property color dim: panel.dim
-  readonly property color accent: Model.tabTint("processes", panel.palette, String(Color.background))
+  readonly property color accent: Model.tabTint("processes", panel.palette, String(Commons.Color.background))
 
   property string query: ""
   property bool mine: false
@@ -431,7 +432,7 @@ Column {
               wrapMode: Text.WordWrap
               textFormat: Text.PlainText
               text: "󰀪  Your desktop session depends on " + parent.p.name + ": ending it can close every window or log you out."
-              color: Color.urgent
+              color: Commons.Color.urgent
               font.family: view.ff
               font.pixelSize: Style.font.caption
             }
@@ -471,8 +472,8 @@ Column {
                   text: isArmed ? modelData.label + "? Click again" : modelData.label
                   tooltipText: modelData.tip
                   bordered: true
-                  foreground: isArmed ? Color.urgent : tint
-                  background: isArmed ? Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.14) : "transparent"
+                  foreground: isArmed ? Commons.Color.urgent : tint
+                  background: isArmed ? Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.14) : "transparent"
                   fontFamily: view.ff
                   fontSize: Style.font.caption
                   iconSize: Style.font.bodySmall
@@ -519,8 +520,8 @@ Column {
                   text: isArmed ? modelData.label + "? Click again" : modelData.label
                   tooltipText: modelData.label + ": this process and everything it started, children first"
                   bordered: true
-                  foreground: isArmed ? Color.urgent : Model.actionColor(modelData.key === "KILL" ? "shutdown" : "reboot", view.panel.palette, view.fg)
-                  background: isArmed ? Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.14) : "transparent"
+                  foreground: isArmed ? Commons.Color.urgent : Model.actionColor(modelData.key === "KILL" ? "shutdown" : "reboot", view.panel.palette, view.fg)
+                  background: isArmed ? Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.14) : "transparent"
                   fontFamily: view.ff
                   fontSize: Style.font.caption
                   iconSize: Style.font.bodySmall

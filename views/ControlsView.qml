@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../lib/Model.js" as Model
 import "../components"
 
@@ -23,7 +24,7 @@ Column {
   // Suspend or hibernate may not come back on this machine.
   Card {
     visible: view.s.sleepIssues.length > 0
-    tint: Color.urgent
+    tint: Commons.Color.urgent
     foreground: view.fg
     fontFamily: view.ff
     text: view.s.sleepIssues.map(function(i) { return "󰀪  " + i.text }).join("\n")

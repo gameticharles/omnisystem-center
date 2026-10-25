@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 // One fact: a dim label, the value on the right. Clicking copies the value.
 Item {
@@ -9,7 +10,7 @@ Item {
   property string label: ""
   property string value: ""
   property string detail: ""
-  property color foreground: Color.foreground
+  property color foreground: Commons.Color.foreground
   property color valueColor: foreground
   property string fontFamily: Style.font.family
   signal copyRequested(string text)

@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // A small line graph. Either `segments` (lists of [x, y] already in this
 // item's coordinates, split where data is missing) or `points` (one list).
@@ -9,11 +10,11 @@ Item {
 
   property var segments: []
   property var points: []
-  property color color: Color.foreground
+  property color color: Commons.Color.foreground
   property real lineWidth: 1.6
   property bool fill: true
   property real guideY: -1
-  property color guideColor: Color.accent
+  property color guideColor: Commons.Color.accent
   property color gridColor: Util.alpha(color, 0.10)
   property int gridLines: 3
 

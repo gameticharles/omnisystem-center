@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../lib/Model.js" as Model
 import "../components"
 
@@ -16,7 +17,7 @@ Column {
   readonly property color fg: panel.foreground
   readonly property string ff: panel.fontFamily
   readonly property color dim: panel.dim
-  readonly property color accent: Model.tabTint("ports", panel.palette, String(Color.background))
+  readonly property color accent: Model.tabTint("ports", panel.palette, String(Commons.Color.background))
 
   property string filter: "dev"
   property string query: ""
@@ -96,7 +97,7 @@ Column {
           text: view.s.portData ? view.counts.all + " listening · " + view.counts.dev + " dev · " + view.counts.exposed + " open to the network"
                                 + (view.counts.devExposed > 0 ? "  ·  󰀪 " + view.counts.devExposed + " dev exposed" : "")
                                 : "Reading ports…"
-          color: view.counts.devExposed > 0 ? Color.urgent : view.dim
+          color: view.counts.devExposed > 0 ? Commons.Color.urgent : view.dim
           font.family: view.ff
           font.pixelSize: Style.font.caption
           font.bold: true
@@ -143,7 +144,7 @@ Column {
           Button {
             required property var modelData
             readonly property bool on: view.filter === modelData.key
-            readonly property color tint: modelData.key === "exposed" && view.counts.exposed > 0 ? Color.urgent : view.accent
+            readonly property color tint: modelData.key === "exposed" && view.counts.exposed > 0 ? Commons.Color.urgent : view.accent
             text: modelData.label + " " + view.counts[modelData.key]
             tooltipText: modelData.tip
             bordered: true
@@ -248,7 +249,7 @@ Column {
           readonly property var r: modelData
           readonly property bool exposed: Model.portExposed(r)
           readonly property string key: r.proto + r.port + ":" + (r.pid || "")
-          readonly property color reachTint: r.reach === "network" ? (r.dev ? Color.urgent : Model.actionColor("reboot", view.panel.palette, view.fg))
+          readonly property color reachTint: r.reach === "network" ? (r.dev ? Commons.Color.urgent : Model.actionColor("reboot", view.panel.palette, view.fg))
                                            : r.reach === "vpn" ? Model.actionColor("hibernate", view.panel.palette, view.accent)
                                            : r.reach === "containers" ? Model.actionColor("suspend", view.panel.palette, view.accent) : view.dim
           width: group.width
@@ -267,7 +268,7 @@ Column {
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
             text: row.r.icon
-            color: row.alert ? Color.urgent : (row.r.dev ? view.accent : view.dim)
+            color: row.alert ? Commons.Color.urgent : (row.r.dev ? view.accent : view.dim)
             font.family: view.ff
             font.pixelSize: Style.font.title * 1.2
           }
@@ -342,7 +343,7 @@ Column {
               textFormat: Text.PlainText
               text: row.r.addresses.join(", ") + (row.r.cmd ? "   " + row.r.cmd : "")
               maximumLineCount: 1
-              color: row.alert ? Color.urgent : view.dim
+              color: row.alert ? Commons.Color.urgent : view.dim
               font.family: view.ff
               font.pixelSize: Style.font.caption
               elide: Text.ElideMiddle
@@ -402,7 +403,7 @@ Column {
               readonly property bool isArmed: view.armed === row.key + ":TERM"
               iconText: isArmed ? "󰀪" : "󰓛"
               tooltipText: isArmed ? "Click again to stop " + row.r.port : "Stop (SIGTERM): click twice"
-              foreground: isArmed ? Color.urgent : Model.actionColor("reboot", view.panel.palette, view.fg)
+              foreground: isArmed ? Commons.Color.urgent : Model.actionColor("reboot", view.panel.palette, view.fg)
               fontFamily: view.ff
               onClicked: {
                 if (!isArmed) { view.arm(row.key + ":TERM"); return }
@@ -415,7 +416,7 @@ Column {
               readonly property bool isArmed: view.armed === row.key + ":KILL"
               iconText: isArmed ? "󰀪" : "󰚌"
               tooltipText: isArmed ? "Click again to kill " + row.r.port : "Force kill (SIGKILL): click twice"
-              foreground: isArmed ? Color.urgent : Model.actionColor("shutdown", view.panel.palette, view.fg)
+              foreground: isArmed ? Commons.Color.urgent : Model.actionColor("shutdown", view.panel.palette, view.fg)
               fontFamily: view.ff
               onClicked: {
                 if (!isArmed) { view.arm(row.key + ":KILL"); return }
@@ -428,7 +429,7 @@ Column {
               readonly property bool isArmed: view.armed === row.key + ":STOP"
               iconText: isArmed ? "󰀪" : "󰓛"
               tooltipText: isArmed ? "Click again to stop the container" : "Stop the container " + (row.r.container ? row.r.container.name : "") + ": click twice"
-              foreground: isArmed ? Color.urgent : Model.actionColor("reboot", view.panel.palette, view.fg)
+              foreground: isArmed ? Commons.Color.urgent : Model.actionColor("reboot", view.panel.palette, view.fg)
               fontFamily: view.ff
               onClicked: {
                 if (!isArmed) { view.arm(row.key + ":STOP"); return }

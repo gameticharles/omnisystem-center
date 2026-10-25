@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "omnisystem-center",
   "name": "OmniSystem Center",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Charles Gameti",
   "license": "MIT",
   "description": "Your machine in one bar widget, replacing Omarchy's Power widget: battery, charge limit (kernel, Apple, UPower, Acer) and its care, low and critical warnings with a sleep-readiness check, power profiles, keep awake and a sleep timer; an energy meter with cost, a monthly budget and CSV export; every sensor and GPU; processes with GPU use, signals and trees; listening ports by project with dev-server rules; an Omarchy plugin manager with the marketplace, pinned installs, update previews, bar layout and widget settings; gadget batteries; and lock to shutdown.",

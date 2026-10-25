@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../lib/Model.js" as Model
 import "../components"
 
@@ -53,7 +54,7 @@ Column {
         id: bigWatts
         textFormat: Text.PlainText
         text: view.now && typeof view.now.watts === "number" ? Model.formatWatts(view.now.watts) || "0 W" : "–"
-        color: view.s.energyHigh ? Color.urgent : view.fg
+        color: view.s.energyHigh ? Commons.Color.urgent : view.fg
         font.family: view.ff
         font.pixelSize: Style.font.displayLarge
         font.bold: true
@@ -106,7 +107,7 @@ Column {
         width: parent.width
         height: Style.space(8)
         Rectangle { width: parent.width * (parent.parent.shares ? parent.parent.shares.cpu : 0); height: parent.height; color: view.fg; radius: 2 }
-        Rectangle { width: parent.width * (parent.parent.shares ? parent.parent.shares.gpu : 0); height: parent.height; color: Color.accent; radius: 2 }
+        Rectangle { width: parent.width * (parent.parent.shares ? parent.parent.shares.gpu : 0); height: parent.height; color: Commons.Color.accent; radius: 2 }
         Rectangle { width: parent.width * (parent.parent.shares ? parent.parent.shares.rest : 0); height: parent.height; color: Util.alpha(view.fg, 0.3); radius: 2 }
       }
       Text {
@@ -174,7 +175,7 @@ Column {
       readonly property real budget: view.settings && view.settings.monthly_budget ? view.settings.monthly_budget : 0
       readonly property real spent: view.month && typeof view.month.cost === "number" ? view.month.cost : 0
       readonly property real share: budget > 0 ? spent / budget : 0
-      readonly property color tone: share >= 1 ? Color.urgent : share >= 0.8 ? Model.actionColor("reboot", view.panel.palette, view.fg) : view.panel.palette.accent
+      readonly property color tone: share >= 1 ? Commons.Color.urgent : share >= 0.8 ? Model.actionColor("reboot", view.panel.palette, view.fg) : view.panel.palette.accent
       visible: view.priced && budget > 0
       width: parent.width
       spacing: Style.space(4)
@@ -338,7 +339,7 @@ Column {
         }
         Rectangle {
           visible: chartBox.hover >= 0
-          color: Util.alpha(Color.background, 0.85)
+          color: Util.alpha(Commons.Color.background, 0.85)
           radius: Style.space(4)
           width: readout.implicitWidth + Style.space(12)
           height: readout.implicitHeight + Style.space(6)

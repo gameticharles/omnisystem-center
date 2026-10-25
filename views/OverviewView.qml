@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../lib/Model.js" as Model
 import "../components"
 
@@ -46,7 +47,7 @@ Column {
           id: heroIcon
           textFormat: Text.PlainText
           text: view.s.batteryGlyph
-          color: view.s.isLow ? Color.urgent : view.fg
+          color: view.s.isLow ? Commons.Color.urgent : view.fg
           font.family: view.ff
           font.pixelSize: Style.font.display
           anchors.left: parent.left
@@ -94,7 +95,7 @@ Column {
           id: heroPercent
           textFormat: Text.PlainText
           text: view.s.level >= 0 ? view.s.level + "%" : "—"
-          color: view.s.isLow ? Color.urgent : view.fg
+          color: view.s.isLow ? Commons.Color.urgent : view.fg
           font.family: view.ff
           font.pixelSize: Style.font.displayLarge
           font.bold: true
@@ -106,7 +107,7 @@ Column {
       Meter {
         width: parent.width
         value: view.s.fraction
-        color: view.s.isLow ? Color.urgent : view.panel.palette.accent
+        color: view.s.isLow ? Commons.Color.urgent : view.panel.palette.accent
         pulsing: view.s.charging && panel.opened
         marker: view.s.limitCapable && view.s.store.care.enabled && !view.s.topUp ? view.s.store.care.limit / 100
               : (view.s.backend.kind === "none" && view.s.store.care.unplugReminder ? view.s.store.care.limit / 100 : -1)
@@ -131,7 +132,7 @@ Column {
           width: parent.cell
           label: "Health"
           value: view.s.sysfsBattery.health >= 0 ? view.s.sysfsBattery.health + "% · " + Model.healthLabel(view.s.sysfsBattery.health) : ""
-          valueColor: view.s.sysfsBattery.health >= 0 && view.s.sysfsBattery.health < 50 ? Color.urgent : view.fg
+          valueColor: view.s.sysfsBattery.health >= 0 && view.s.sysfsBattery.health < 50 ? Commons.Color.urgent : view.fg
           foreground: view.fg
           fontFamily: view.ff
         }
@@ -153,7 +154,7 @@ Column {
           width: parent.cell
           label: "Temperature"
           value: view.s.temperature > 0 ? view.s.temperature + " °C" : ""
-          valueColor: view.s.temperature >= 40 ? Color.urgent : view.fg
+          valueColor: view.s.temperature >= 40 ? Commons.Color.urgent : view.fg
           foreground: view.fg
           fontFamily: view.ff
         }
@@ -286,7 +287,7 @@ Column {
               width: parent.width
               implicitHeight: Style.space(5)
               value: row.modelData.level / 100
-              color: row.low ? Color.urgent : view.panel.palette.accent
+              color: row.low ? Commons.Color.urgent : view.panel.palette.accent
               pulsing: row.modelData.charging === true && view.panel.opened
             }
           }
@@ -298,7 +299,7 @@ Column {
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
             text: row.modelData.offline ? "offline" : (row.modelData.charging ? "󱐋 " : "") + row.modelData.level + "%"
-            color: row.low ? Color.urgent : (row.modelData.offline ? view.dim : view.fg)
+            color: row.low ? Commons.Color.urgent : (row.modelData.offline ? view.dim : view.fg)
             font.family: view.ff
             font.pixelSize: Style.font.body
           }

@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // One reading: a small dim label over its value.
 Column {
@@ -8,7 +9,7 @@ Column {
   property string label: ""
   property string value: ""
   property color valueColor: foreground
-  property color foreground: Color.foreground
+  property color foreground: Commons.Color.foreground
   property string fontFamily: Style.font.family
 
   spacing: Style.space(2)

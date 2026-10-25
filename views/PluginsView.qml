@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 import "../lib/Model.js" as Model
 import "../components"
 
@@ -16,7 +17,7 @@ Column {
   readonly property color fg: panel.foreground
   readonly property string ff: panel.fontFamily
   readonly property color dim: panel.dim
-  readonly property color accent: Model.tabTint("plugins", panel.palette, String(Color.background))
+  readonly property color accent: Model.tabTint("plugins", panel.palette, String(Commons.Color.background))
 
   property string mode: "installed"
   property string filter: "all"
@@ -145,7 +146,7 @@ Column {
         height: jobColumn.implicitHeight + Style.space(16)
         radius: Style.cornerRadius
         readonly property var j: view.s.pluginJob || {}
-        readonly property color tone: j.state === "failed" ? Color.urgent : view.accent
+        readonly property color tone: j.state === "failed" ? Commons.Color.urgent : view.accent
         color: Qt.rgba(tone.r, tone.g, tone.b, 0.10)
         border.color: Qt.rgba(tone.r, tone.g, tone.b, 0.5)
         border.width: 1
@@ -169,7 +170,7 @@ Column {
               text: (j.state === "running" ? "󰑓  " + view.jobVerb(j.action, false) + " " + j.id + "…"
                      : j.state === "done" ? "󰄬  " + view.jobVerb(j.action, true) + " " + j.id
                      : "󰅚  Could not " + j.action + " " + j.id)
-              color: j.state === "failed" ? Color.urgent : view.fg
+              color: j.state === "failed" ? Commons.Color.urgent : view.fg
               font.family: view.ff
               font.pixelSize: Style.font.bodySmall
               font.bold: true
@@ -619,7 +620,7 @@ Column {
                 tooltipText: "Deletes the plugin's folder (omarchy plugin remove)"
                 enabled: !view.busy
                 bordered: true
-                foreground: isArmed ? Color.urgent : Model.actionColor("shutdown", view.panel.palette, view.fg)
+                foreground: isArmed ? Commons.Color.urgent : Model.actionColor("shutdown", view.panel.palette, view.fg)
                 fontFamily: view.ff
                 fontSize: Style.font.caption
                 verticalPadding: Style.space(4)
@@ -1000,7 +1001,7 @@ Column {
               width: zoomGlyph.implicitWidth + Style.space(8)
               height: zoomGlyph.implicitHeight + Style.space(2)
               radius: height / 2
-              color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 0.8)
+              color: Qt.rgba(Commons.Color.background.r, Commons.Color.background.g, Commons.Color.background.b, 0.8)
               Text {
                 id: zoomGlyph
                 anchors.centerIn: parent
@@ -1182,7 +1183,7 @@ Column {
                 tooltipText: "omarchy plugin add " + parent.p.repo + " --enable: the repository as it is now, " + Model.shortSha(parent.p.upstreamObservedCommit)
                 enabled: !view.busy
                 bordered: true
-                foreground: isArmed ? Color.urgent : view.dim
+                foreground: isArmed ? Commons.Color.urgent : view.dim
                 fontFamily: view.ff
                 fontSize: Style.font.caption
                 verticalPadding: Style.space(4)

@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 // A tinted note with optional buttons underneath; the buttons are this
 // item's children.
@@ -8,8 +9,8 @@ BorderSurface {
   id: root
 
   property string text: ""
-  property color tint: Color.accent
-  property color foreground: Color.foreground
+  property color tint: Commons.Color.accent
+  property color foreground: Commons.Color.foreground
   property string fontFamily: Style.font.family
   default property alias buttons: buttonRow.data
 

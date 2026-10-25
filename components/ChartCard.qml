@@ -1,12 +1,13 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // A container for a chart: a rounded surface with a faint border and an
 // inner margin, so the graph's extent is plain. The chart is its child.
 Item {
   id: card
 
-  property color foreground: Color.foreground
+  property color foreground: Commons.Color.foreground
   property real padding: Style.space(10)
   default property alias content: inner.data
 

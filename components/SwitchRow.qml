@@ -1,6 +1,7 @@
 import QtQuick
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 // A setting with a switch: label and optional hint on the left, the switch on
 // the right.
@@ -11,7 +12,7 @@ Item {
   property string hint: ""
   property bool checked: false
   property bool interactive: true
-  property color foreground: Color.foreground
+  property color foreground: Commons.Color.foreground
   property string fontFamily: Style.font.family
 
   signal toggled()
